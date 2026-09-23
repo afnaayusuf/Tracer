@@ -1,0 +1,129 @@
+{
+  "$defs": {
+    "CamTime": {
+      "description": "E-ING-01 / E-ING-06: a timestamp is the camera's own UTC reading plus the\nestimated offset to the site reference clock. Fusion and the fact miner use\ncorrected_ms(); display converts to local time at the edge of the system only.",
+      "properties": {
+        "cam_utc_ms": {
+          "title": "Cam Utc Ms",
+          "type": "integer"
+        },
+        "offset_ms": {
+          "default": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "offset_confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Offset Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "cam_utc_ms"
+      ],
+      "title": "CamTime",
+      "type": "object"
+    },
+    "CastMember": {
+      "properties": {
+        "entity_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entity Id"
+        },
+        "tube_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tube Ids",
+          "type": "array"
+        },
+        "class_label": {
+          "title": "Class Label",
+          "type": "string"
+        },
+        "named": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Named"
+        },
+        "best_keyframe_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Best Keyframe Ref"
+        }
+      },
+      "required": [
+        "tube_ids",
+        "class_label"
+      ],
+      "title": "CastMember",
+      "type": "object"
+    },
+    "EpisodeStatus": {
+      "enum": [
+        "open",
+        "closed",
+        "soft_cut",
+        "truncated"
+      ],
+      "title": "EpisodeStatus",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "kind": {
+      "const": "close",
+      "default": "close",
+      "title": "Kind",
+      "type": "string"
+    },
+    "episode_id": {
+      "title": "Episode Id",
+      "type": "string"
+    },
+    "t1": {
+      "$ref": "#/$defs/CamTime"
+    },
+    "status": {
+      "$ref": "#/$defs/EpisodeStatus"
+    },
+    "cast": {
+      "items": {
+        "$ref": "#/$defs/CastMember"
+      },
+      "title": "Cast",
+      "type": "array"
+    }
+  },
+  "required": [
+    "episode_id",
+    "t1",
+    "status"
+  ],
+  "title": "EpisodeClose",
+  "type": "object"
+}

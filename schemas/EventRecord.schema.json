@@ -1,0 +1,197 @@
+{
+  "$defs": {
+    "CamTime": {
+      "description": "E-ING-01 / E-ING-06: a timestamp is the camera's own UTC reading plus the\nestimated offset to the site reference clock. Fusion and the fact miner use\ncorrected_ms(); display converts to local time at the edge of the system only.",
+      "properties": {
+        "cam_utc_ms": {
+          "title": "Cam Utc Ms",
+          "type": "integer"
+        },
+        "offset_ms": {
+          "default": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "offset_confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Offset Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "cam_utc_ms"
+      ],
+      "title": "CamTime",
+      "type": "object"
+    },
+    "Event": {
+      "properties": {
+        "event_id": {
+          "title": "Event Id",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/EventType"
+        },
+        "t": {
+          "$ref": "#/$defs/CamTime"
+        },
+        "camera_id": {
+          "title": "Camera Id",
+          "type": "string"
+        },
+        "tile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tile Id"
+        },
+        "zone_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Zone Id"
+        },
+        "subject_tube_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Subject Tube Ids",
+          "type": "array"
+        },
+        "subject_entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Subject Entity Ids",
+          "type": "array"
+        },
+        "object_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Object Ids",
+          "type": "array"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "confidence": {
+          "default": 1.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "source": {
+          "default": "deterministic",
+          "enum": [
+            "deterministic",
+            "walk",
+            "observed",
+            "user"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "episode_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Episode Id"
+        },
+        "dedupe_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dedupe Key"
+        }
+      },
+      "required": [
+        "event_id",
+        "type",
+        "t",
+        "camera_id"
+      ],
+      "title": "Event",
+      "type": "object"
+    },
+    "EventType": {
+      "enum": [
+        "enter_zone",
+        "exit_zone",
+        "dwell",
+        "loiter",
+        "approach",
+        "meet",
+        "pickup",
+        "drop",
+        "left_behind",
+        "asset_missing_from_home",
+        "fall",
+        "run",
+        "crowd",
+        "handoff",
+        "impossible_transition",
+        "illumination_change",
+        "door_state_change",
+        "appliance_state_change",
+        "modality_switch",
+        "signal_lost",
+        "signal_restored",
+        "camera_moved_suspect"
+      ],
+      "title": "EventType",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "kind": {
+      "const": "event",
+      "default": "event",
+      "title": "Kind",
+      "type": "string"
+    },
+    "episode_id": {
+      "title": "Episode Id",
+      "type": "string"
+    },
+    "event": {
+      "$ref": "#/$defs/Event"
+    }
+  },
+  "required": [
+    "episode_id",
+    "event"
+  ],
+  "title": "EventRecord",
+  "type": "object"
+}

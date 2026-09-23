@@ -1,0 +1,450 @@
+# Edge-case registry. Source of truth for `make coverage`.
+# status: implemented (code exists; MUST have a test marked @pytest.mark.edge("ID"))
+#         planned     (in scope for month 1; coverage prints it as TODO)
+#         deferred    (out of month-1 scope; listed so it is not forgotten)
+# Adding a case: append here first, then code, then test. Never the other order.
+version: 1
+cases:
+# ---------------- ingest / time ----------------
+- id: E-ING-01
+  ring: ingest
+  title: Camera clocks disagree
+  trigger: Cameras drift seconds apart; fusion hand-offs and the ±1 s fact-miner window fail.
+  handling: Every timestamp is CamTime{cam_utc_ms, offset_ms, offset_confidence}; offsets estimated in the calibration walk and re-estimated from hand-offs; fusion uses corrected_ms() only.
+  status: implemented
+- id: E-ING-02
+  ring: ingest
+  title: Stream drops or reconnects
+  trigger: RTSP disconnect mid-episode.
+  handling: signal_lost/signal_restored events; open episode on that camera closes with status=truncated; tubes go to lost, not exited.
+  status: implemented
+- id: E-ING-03
+  ring: ingest
+  title: Variable or dropped frame rate
+  trigger: Camera throttles under load; fps changes.
+  handling: Ticks are wall-clock windows (t_start,t_end), never frame indices; tube age computed from corrected time.
+  status: implemented
+- id: E-ING-04
+  ring: ingest
+  title: Codec without motion vectors
+  trigger: MJPEG or unknown codec stream.
+  handling: Gate interface is codec-agnostic; FrameDiffGate fallback at 1 fps; camera profile records gate_mode.
+  status: planned
+- id: E-ING-05
+  ring: ingest
+  title: Resolution or aspect change mid-stream
+  trigger: Camera reconfigured; homography and zones now invalid.
+  handling: Detect frame-size change; freeze fusion for that camera; raise camera_moved_suspect; require recalibration.
+  status: planned
+- id: E-ING-06
+  ring: ingest
+  title: Timezone and DST
+  trigger: '"Yesterday afternoon" across a DST switch or a site in another timezone.'
+  handling: All storage in UTC ms; site timezone stored in KB; agent resolves local windows explicitly and echoes them in the answer.
+  status: implemented
+- id: E-ING-07
+  ring: ingest
+  title: Duplicate or out-of-order frames
+  trigger: RTSP jitter delivers repeated or reordered PTS.
+  handling: Dedupe by PTS per camera; drop frames older than the last processed tick.
+  status: planned
+# ---------------- ring 0 gate ----------------
+- id: E-GATE-01
+  ring: ring0
+  title: Stationary object is invisible to the gate
+  trigger: Person stops moving; bag placed and left; fallen person still.
+  handling: Heartbeat detections on I-frames (1–2 s active tiles, 10–30 s quiet, always on asset homes) keep tubes alive; not the gate's job.
+  status: implemented
+- id: E-GATE-02
+  ring: ring0
+  title: Lighting change looks like whole-frame motion
+  trigger: Light switch, IR-cut toggle, cloud passes.
+  handling: Global luminance step detected before differencing; emitted as illumination_change scene-state event; blobs suppressed for that update.
+  status: implemented
+- id: E-GATE-03
+  ring: ring0
+  title: Foliage, rain, insects, sensor noise
+  trigger: Persistent low-level motion that is not an object.
+  handling: Adaptive noise floor (median block energy over history) × k; MV-field coherence test once MVGate lands.
+  status: implemented
+- id: E-GATE-04
+  ring: ring0
+  title: Camera shake or PTZ move
+  trigger: Most of the frame changes at once.
+  handling: active_fraction > threshold => global_motion; blobs suppressed, background frozen; sustained => camera_moved_suspect.
+  status: implemented
+- id: E-GATE-05
+  ring: ring0
+  title: Very slow motion under threshold
+  trigger: Someone creeping; object slid slowly.
+  handling: Heartbeat detections catch state deltas the gate misses; gate FN rate is a tracked metric.
+  status: planned
+- id: E-GATE-06
+  ring: ring0
+  title: Motion in screens, mirrors, reflections
+  trigger: TV playing; mirror shows a person in another zone; steel reflects motion.
+  handling: Scene card media_zones and reflective_surfaces become gate masks; tubes born inside them are reflection_suspect.
+  status: planned
+- id: E-GATE-07
+  ring: ring0
+  title: Intra-only or all-I-frame streams
+  trigger: Encoder configured with no P-frames; no motion vectors.
+  handling: Same fallback as E-ING-04.
+  status: planned
+- id: E-GATE-08
+  ring: ring0
+  title: Night noise inflates motion energy
+  trigger: High-gain low-light mode.
+  handling: Per-modality threshold profile; coherence weighted higher at night.
+  status: planned
+# ---------------- ring 1 detect ----------------
+- id: E-DET-01
+  ring: ring1
+  title: Tiny objects below detector floor
+  trigger: Keys, phone, small tools at room-camera resolution.
+  handling: Not detected as tubes; tracked via carried_item attribute and asset-home occupancy; inspect tool for on-demand native-res count/find; resolution ceiling stated in answers.
+  status: planned
+- id: E-DET-02
+  ring: ring1
+  title: Truncation at frame edge
+  trigger: Half a person at the border.
+  handling: Foot point marked fallback_bbox_bottom with wide uncertainty; keyframe scoring penalises truncated boxes.
+  status: planned
+- id: E-DET-03
+  ring: ring1
+  title: Class confusion
+  trigger: Child vs small adult; dog vs bag; mannequin vs person.
+  handling: Class is an attribute with confidence; enrichment can override; agent never asserts class below threshold.
+  status: planned
+- id: E-DET-04
+  ring: ring1
+  title: Ghost detections in reflections
+  trigger: Mirror/glass shows a duplicate person.
+  handling: Tubes inside reflective_surfaces are reflection_suspect; fusion never creates an entity from a suspect tube alone.
+  status: planned
+- id: E-DET-05
+  ring: ring1
+  title: People on screens, posters, photos
+  trigger: TV shows a face; framed photo detected as person.
+  handling: media_zones from scene card; detections fully inside a media zone with no tube motion are dropped.
+  status: planned
+- id: E-DET-06
+  ring: ring1
+  title: Dense crowds
+  trigger: Heavy overlap; fragmentation.
+  handling: crowd event on density; tube quality flag; enrichment skipped for low-quality tubes.
+  status: deferred
+- id: E-DET-07
+  ring: ring1
+  title: Fisheye or wide-lens distortion
+  trigger: Homography from a distorted image.
+  handling: fov_class from scene card; undistort before foot-point projection.
+  status: deferred
+- id: E-DET-08
+  ring: ring1
+  title: IR appearance shift lowers recall
+  trigger: Night mode.
+  handling: Measured on night eval set before any enhancer; enhancer only if gap is real and license clear.
+  status: planned
+# ---------------- ring 2 tubes / fusion ----------------
+- id: E-TUBE-01
+  ring: ring2
+  title: ID switch when paths cross
+  trigger: Two people cross; IoU ambiguous.
+  handling: Keep best match; record other as merge_candidate; never silently merge; fusion may later resolve with ReID.
+  status: implemented
+- id: E-TUBE-02
+  ring: ring2
+  title: Occlusion
+  trigger: Person behind furniture or another person.
+  handling: state=occluded with occluded_since; after max_occluded_ms becomes lost (or exited if last box touched an exit zone).
+  status: implemented
+- id: E-TUBE-03
+  ring: ring2
+  title: Long stationary dwell
+  trigger: Sleeping person; parked object.
+  handling: Heartbeat detections with det_source=heartbeat keep the track active.
+  status: implemented
+- id: E-TUBE-04
+  ring: ring2
+  title: Re-entry after leaving
+  trigger: Same person returns minutes later.
+  handling: New tube; fusion links to the same entity via ReID + gallery; the agent reports entity, not tube.
+  status: planned
+- id: E-TUBE-05
+  ring: ring2
+  title: Same person in two overlapping cameras
+  trigger: Overlap region.
+  handling: Per-camera tracker never merges; fusion merges by floor distance + ReID + time; enrichment once per entity, best view elected.
+  status: planned
+- id: E-TUBE-06
+  ring: ring2
+  title: Hand-off outside transit bounds
+  trigger: Entity appears in a non-adjacent tile too fast.
+  handling: impossible_transition event; no merge; anomaly surfaced.
+  status: planned
+- id: E-TUBE-07
+  ring: ring2
+  title: Blind-spot ambiguity
+  trigger: Two enter a blind spot, one exits.
+  handling: Delay-state keeps both candidates with probabilities; answer states ambiguity.
+  status: deferred
+- id: E-TUBE-08
+  ring: ring2
+  title: Appearance drift within a day
+  trigger: Jacket on/off; bag picked up.
+  handling: Multiple exemplars per entity; embedding refresh on confident matches; oldest expire.
+  status: planned
+- id: E-TUBE-09
+  ring: ring2
+  title: Carried object is not its own tube
+  trigger: Bag on shoulder; keys in hand.
+  handling: carried_item attribute on the person tube; object tube only when placed and stationary.
+  status: planned
+- id: E-TUBE-10
+  ring: ring2
+  title: Pets, strollers, wheelchairs
+  trigger: Non-person moving classes; child inside stroller.
+  handling: Class-specific lifecycle; stroller+child handled as one tube with carried_item=child hint.
+  status: deferred
+- id: E-TUBE-12
+  ring: ring2
+  title: Feet occluded, foot point wrong
+  trigger: Person behind counter.
+  handling: FloorPoint.source=fallback_bbox_bottom and uncertainty widened; fusion tolerances read it.
+  status: implemented
+# ---------------- ring 3a events ----------------
+- id: E-EVT-01
+  ring: ring3a
+  title: Zone boundary jitter
+  trigger: Foot point oscillates on a zone edge.
+  handling: 'Hysteresis: enter after N consecutive inside ticks, exit after N outside.'
+  status: implemented
+- id: E-EVT-02
+  ring: ring3a
+  title: Cross-camera event order under clock offset
+  trigger: Kitchen camera 2 s ahead of hallway.
+  handling: Sort by corrected_ms; hand-off window tolerates offset_confidence.
+  status: planned
+- id: E-EVT-03
+  ring: ring3a
+  title: False pickup from occlusion of the shelf
+  trigger: Person stands in front of the asset home; heartbeat cannot see the asset.
+  handling: Pickup requires asset absent on a heartbeat taken with nobody inside the zone, after a present reading; subject = visitors in between; no visitors => asset_missing_from_home with no blame.
+  status: implemented
+- id: E-EVT-04
+  ring: ring3a
+  title: Fall vs lying down on purpose
+  trigger: Person lies on sofa/bed.
+  handling: rest zones from scene card suppress fall; fall requires vertical velocity + pose primitive outside rest zones.
+  status: deferred
+- id: E-EVT-05
+  ring: ring3a
+  title: Left-behind vs placed at home
+  trigger: Bag set on its usual hook.
+  handling: left_behind only outside the object's home zone.
+  status: planned
+- id: E-EVT-06
+  ring: ring3a
+  title: Duplicate events from overlapping cameras
+  trigger: Both cameras see the same enter.
+  handling: dedupe_key = type|entity|time bucket at fusion; per-camera events keep camera_id for evidence.
+  status: implemented
+- id: E-EVT-07
+  ring: ring3a
+  title: Episode never closes
+  trigger: Busy lobby active for hours.
+  handling: soft_cut on cast churn > threshold or max duration; events may span episodes.
+  status: implemented
+- id: E-EVT-08
+  ring: ring3a
+  title: Event spans an episode boundary
+  trigger: Dwell starts in one episode and ends in the next.
+  handling: Events carry episode_id of emission; queries join across episodes by entity and time, never by episode alone.
+  status: planned
+# ---------------- ring 3b foveation / enrichment ----------------
+- id: E-FOV-01
+  ring: ring3b
+  title: Crop too small to describe
+  trigger: Short side < 96 px.
+  handling: Enhancement ladder; enhanced=true propagates to attributes; confidence discounted.
+  status: implemented
+- id: E-FOV-02
+  ring: ring3b
+  title: Motion blur
+  trigger: Fast movement.
+  handling: Keyframe score uses Laplacian sharpness; blurred frames skipped; if none sharp, attributes low confidence.
+  status: planned
+- id: E-FOV-03
+  ring: ring3b
+  title: Backlit or overexposed subject
+  trigger: Doorway against daylight.
+  handling: Exposure score in keyframe selection; try other keyframes; color_reason=low_confidence.
+  status: planned
+- id: E-FOV-04
+  ring: ring3b
+  title: Cross-cell attribute bleed in contact sheets
+  trigger: VLM describes cell 3 with cell 4's jacket.
+  handling: Hard borders + cell ids; fixed expected_cells; per-cell schema; bleed rate measured on eval set; fall back to 12 cells if >5%.
+  status: implemented
+- id: E-FOV-05
+  ring: ring3b
+  title: Hallucinated color in IR
+  trigger: Monochrome crop.
+  handling: Attributes validator and grammar forbid colors when modality is ir/thermal; color_reason=ir_mode; tone fields instead.
+  status: implemented
+- id: E-FOV-06
+  ring: ring3b
+  title: Ring buffer expired before enrichment
+  trigger: Slow path lags past buffer window.
+  handling: Best keyframe crop persisted to R2 at tube birth; keyframe_refs on the tube.
+  status: implemented
+- id: E-FOV-07
+  ring: ring3b
+  title: VLM output violates schema
+  trigger: Grammar bug or truncation.
+  handling: Retry once; then EnrichmentPatch{failed=true}; tick never blocked.
+  status: implemented
+- id: E-FOV-08
+  ring: ring3b
+  title: Attributes contradict across keyframes
+  trigger: Red jacket in one, dark in another.
+  handling: Majority vote over keyframes; keep history; confidence reflects agreement.
+  status: planned
+# ---------------- storage / handoff ----------------
+- id: E-STO-01
+  ring: storage
+  title: Patch arrives after episode closed
+  trigger: Slow path finishes late.
+  handling: Episode file is append-only; PatchRecord accepted after close.
+  status: implemented
+- id: E-STO-02
+  ring: storage
+  title: Retries create duplicates
+  trigger: Writer crashes and replays.
+  handling: Deterministic episode/event ids; per-record idempotency keys.
+  status: implemented
+- id: E-STO-03
+  ring: storage
+  title: Retention expired for a clip
+  trigger: Clip requested for footage past retention.
+  handling: clip tool checks availability; degrades to keyframes; answer states retention.
+  status: planned
+- id: E-STO-04
+  ring: storage
+  title: Schema version bump
+  trigger: New field added mid-deployment.
+  handling: Provenance.schema_version on every record; readers tolerate unknown fields; migration script per bump.
+  status: implemented
+- id: E-STO-05
+  ring: storage
+  title: KB version drift
+  trigger: Transit bounds changed after an episode was compiled.
+  handling: Provenance.kb_version on every record; replays pin the version.
+  status: implemented
+# ---------------- block 2 agent ----------------
+- id: E-AGT-01
+  ring: agent
+  title: Ambiguous anchor
+  trigger: '"After Jay went out" matches two exits.'
+  handling: One clarifying question; never a silent pick.
+  status: planned
+- id: E-AGT-02
+  ring: agent
+  title: No results
+  trigger: Nothing matches the window.
+  handling: Say so; propose widening; never fabricate.
+  status: planned
+- id: E-AGT-03
+  ring: agent
+  title: Unknown named entity
+  trigger: '"Jay" not in gallery.'
+  handling: Ask who Jay is; offer naming form.
+  status: planned
+- id: E-AGT-04
+  ring: agent
+  title: Fuzzy time expressions
+  trigger: '"yesterday afternoon", "after lunch".'
+  handling: Resolve to explicit local window; echo it in the answer.
+  status: planned
+- id: E-AGT-05
+  ring: agent
+  title: Color question on IR footage
+  trigger: '"what color was his shirt" at night.'
+  handling: State IR mode; give tone; never a color.
+  status: planned
+- id: E-AGT-06
+  ring: agent
+  title: Unverified claim
+  trigger: Attribute from a low-confidence patch.
+  handling: verify() before asserting; every claim cites record ids and timestamps.
+  status: planned
+- id: E-AGT-07
+  ring: agent
+  title: Broken custody chain
+  trigger: carried_item missed; drop never fired.
+  handling: 'Graceful degrade: last known custody + offer clip.'
+  status: planned
+- id: E-AGT-08
+  ring: agent
+  title: Duplicates from overlapping cameras in the answer
+  trigger: Same person listed twice.
+  handling: Answer over entities, not tubes.
+  status: planned
+# ---------------- KB / calibration ----------------
+- id: E-KB-01
+  ring: kb
+  title: Camera moved after calibration
+  trigger: Bumped or remounted.
+  handling: Sustained global motion => camera_moved_suspect; landmark check on I-frames; freeze fusion; prompt recalibration.
+  status: implemented
+- id: E-KB-02
+  ring: kb
+  title: Scene card labels wrong
+  trigger: '"Dining hall" is actually the kitchen.'
+  handling: Everything on the card is a hypothesis; user correction bumps version and re-labels.
+  status: planned
+- id: E-KB-03
+  ring: kb
+  title: Causal fact contradicted
+  trigger: Switch flipped, light did not change.
+  handling: Fact.add_contradiction; retire at 2 unless user_confirmed.
+  status: implemented
+- id: E-KB-04
+  ring: kb
+  title: Furniture moved
+  trigger: Shelf relocated; asset home zone stale.
+  handling: Repeated asset_missing with asset detected elsewhere => propose new home.
+  status: deferred
+# ---------------- night ----------------
+- id: E-NIGHT-01
+  ring: night
+  title: IR switch mid-tube
+  trigger: Camera toggles IR while a person is in view.
+  handling: modality_switch event; tube segments carry modality; attributes per segment.
+  status: planned
+- id: E-NIGHT-02
+  ring: night
+  title: ReID does not transfer day to IR
+  trigger: Same person, different modality.
+  handling: Separate exemplar sets per modality; tile/time continuity weighted higher at night.
+  status: planned
+- id: E-NIGHT-03
+  ring: night
+  title: IR blooming near camera
+  trigger: Subject washed out by illuminator.
+  handling: Exposure score rejects keyframe; low confidence attributes.
+  status: deferred
+# ---------------- privacy ----------------
+- id: E-PRIV-01
+  ring: privacy
+  title: Gallery entry deletion
+  trigger: User deletes a named person.
+  handling: 'Cascade: exemplars, names on records, KB facts referencing the entity; anonymous ids remain.'
+  status: planned
+- id: E-PRIV-02
+  ring: privacy
+  title: Face embeddings without opt-in
+  trigger: Face model enabled by default.
+  handling: Site-level opt-in flag gates the face lane; default off.
+  status: planned

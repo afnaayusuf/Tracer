@@ -1,0 +1,100 @@
+{
+  "$defs": {
+    "EnrichmentPatch": {
+      "description": "Slow-path result applied to a tube after the tick was already committed (R4).",
+      "properties": {
+        "patch_id": {
+          "title": "Patch Id",
+          "type": "string"
+        },
+        "tube_id": {
+          "title": "Tube Id",
+          "type": "string"
+        },
+        "produced_at_ms": {
+          "title": "Produced At Ms",
+          "type": "integer"
+        },
+        "source": {
+          "enum": [
+            "vlm",
+            "pose",
+            "ocr",
+            "siglip",
+            "reid",
+            "sr"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "modality": {
+          "$ref": "#/$defs/Modality",
+          "default": "rgb"
+        },
+        "enhanced": {
+          "default": false,
+          "title": "Enhanced",
+          "type": "boolean"
+        },
+        "failed": {
+          "default": false,
+          "title": "Failed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "patch_id",
+        "tube_id",
+        "produced_at_ms",
+        "source",
+        "payload"
+      ],
+      "title": "EnrichmentPatch",
+      "type": "object"
+    },
+    "Modality": {
+      "enum": [
+        "rgb",
+        "lowlight_rgb",
+        "ir",
+        "thermal"
+      ],
+      "title": "Modality",
+      "type": "string"
+    }
+  },
+  "description": "E-STO-01: patches may arrive after close; the file is append-only.",
+  "properties": {
+    "kind": {
+      "const": "patch",
+      "default": "patch",
+      "title": "Kind",
+      "type": "string"
+    },
+    "episode_id": {
+      "title": "Episode Id",
+      "type": "string"
+    },
+    "patch": {
+      "$ref": "#/$defs/EnrichmentPatch"
+    }
+  },
+  "required": [
+    "episode_id",
+    "patch"
+  ],
+  "title": "PatchRecord",
+  "type": "object"
+}

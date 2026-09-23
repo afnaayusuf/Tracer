@@ -1,0 +1,207 @@
+{
+  "$defs": {
+    "Attributes": {
+      "description": "Writer-VLM output for one crop. E-FOV-05: in non-color modalities every color\nfield must be None with color_reason='ir_mode'; the grammar and this validator\nboth enforce it so a monochrome crop can never yield 'red shirt'.",
+      "properties": {
+        "modality": {
+          "$ref": "#/$defs/Modality"
+        },
+        "top_color": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Color"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bottom_color": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Color"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "top_tone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tone"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bottom_tone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tone"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "color_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "ir_mode",
+                "not_visible",
+                "low_confidence"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Color Reason"
+        },
+        "carried_item": {
+          "anyOf": [
+            {
+              "maxLength": 60,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Carried Item"
+        },
+        "carried_item_confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Carried Item Confidence",
+          "type": "number"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 240,
+          "title": "Description",
+          "type": "string"
+        },
+        "enhanced": {
+          "default": false,
+          "title": "Enhanced",
+          "type": "boolean"
+        },
+        "confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "modality"
+      ],
+      "title": "Attributes",
+      "type": "object"
+    },
+    "CellResult": {
+      "properties": {
+        "cell_id": {
+          "minimum": 0,
+          "title": "Cell Id",
+          "type": "integer"
+        },
+        "tube_id": {
+          "title": "Tube Id",
+          "type": "string"
+        },
+        "attributes": {
+          "$ref": "#/$defs/Attributes"
+        }
+      },
+      "required": [
+        "cell_id",
+        "tube_id",
+        "attributes"
+      ],
+      "title": "CellResult",
+      "type": "object"
+    },
+    "Color": {
+      "enum": [
+        "black",
+        "white",
+        "gray",
+        "red",
+        "orange",
+        "yellow",
+        "green",
+        "blue",
+        "purple",
+        "pink",
+        "brown",
+        "multicolor"
+      ],
+      "title": "Color",
+      "type": "string"
+    },
+    "Modality": {
+      "enum": [
+        "rgb",
+        "lowlight_rgb",
+        "ir",
+        "thermal"
+      ],
+      "title": "Modality",
+      "type": "string"
+    },
+    "Tone": {
+      "enum": [
+        "light",
+        "mid",
+        "dark"
+      ],
+      "title": "Tone",
+      "type": "string"
+    }
+  },
+  "description": "One writer-VLM call over a packed sheet. E-FOV-04: cell ids unique and count\nfixed; a missing or duplicated cell is a schema failure, not a silent skip.",
+  "properties": {
+    "sheet_id": {
+      "title": "Sheet Id",
+      "type": "string"
+    },
+    "modality": {
+      "$ref": "#/$defs/Modality"
+    },
+    "expected_cells": {
+      "maximum": 16,
+      "minimum": 1,
+      "title": "Expected Cells",
+      "type": "integer"
+    },
+    "cells": {
+      "items": {
+        "$ref": "#/$defs/CellResult"
+      },
+      "title": "Cells",
+      "type": "array"
+    }
+  },
+  "required": [
+    "sheet_id",
+    "modality",
+    "expected_cells",
+    "cells"
+  ],
+  "title": "ContactSheetResult",
+  "type": "object"
+}

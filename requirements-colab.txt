@@ -1,0 +1,13 @@
+# Pin at first use; verify each against the license column in SPEC.md before promoting.
+pydantic>=2.6
+numpy>=1.26
+pyyaml>=6
+pytest>=8
+rfdetr==1.7.0
+av>=13
+torchreid
+PyNvVideoCodec>=2.1
+vllm>=0.12
+xgrammar
+psycopg[binary]>=3.2
+boto3

@@ -1,0 +1,108 @@
+{
+  "$defs": {
+    "FactStatus": {
+      "enum": [
+        "hypothesis",
+        "fact",
+        "retired"
+      ],
+      "title": "FactStatus",
+      "type": "string"
+    }
+  },
+  "description": "KB edge with provenance. Promotion and retirement are the only state changes\nand both are explicit methods so they can be tested (E-KB-03).",
+  "properties": {
+    "fact_id": {
+      "title": "Fact Id",
+      "type": "string"
+    },
+    "subject": {
+      "title": "Subject",
+      "type": "string"
+    },
+    "predicate": {
+      "title": "Predicate",
+      "type": "string"
+    },
+    "object": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Object",
+      "type": "array"
+    },
+    "status": {
+      "$ref": "#/$defs/FactStatus",
+      "default": "hypothesis"
+    },
+    "confidence": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "source": {
+      "enum": [
+        "calibration",
+        "walk",
+        "observed",
+        "user_confirmed",
+        "inferred"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "support": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Support",
+      "type": "integer"
+    },
+    "contradictions": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Contradictions",
+      "type": "integer"
+    },
+    "evidence": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence",
+      "type": "array"
+    },
+    "first_seen_ms": {
+      "title": "First Seen Ms",
+      "type": "integer"
+    },
+    "last_confirmed_ms": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Confirmed Ms"
+    },
+    "version": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "fact_id",
+    "subject",
+    "predicate",
+    "object",
+    "source",
+    "first_seen_ms"
+  ],
+  "title": "Fact",
+  "type": "object"
+}

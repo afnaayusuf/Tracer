@@ -1,0 +1,413 @@
+{
+  "$defs": {
+    "Actuator": {
+      "description": "controls starts as None: the KB records the unknown explicitly (E-KB-03 seed).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "switch_panel",
+            "door",
+            "window",
+            "appliance",
+            "tap",
+            "other"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "box": {
+          "$ref": "#/$defs/Box"
+        },
+        "controls": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Controls"
+        },
+        "controls_status": {
+          "default": "unknown",
+          "enum": [
+            "unknown",
+            "hypothesis",
+            "fact"
+          ],
+          "title": "Controls Status",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "kind",
+        "box"
+      ],
+      "title": "Actuator",
+      "type": "object"
+    },
+    "Asset": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "box": {
+          "$ref": "#/$defs/Box"
+        },
+        "mask_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mask Ref"
+        },
+        "is_asset_home_candidate": {
+          "default": false,
+          "title": "Is Asset Home Candidate",
+          "type": "boolean"
+        },
+        "confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "box"
+      ],
+      "title": "Asset",
+      "type": "object"
+    },
+    "Box": {
+      "properties": {
+        "x1": {
+          "title": "X1",
+          "type": "number"
+        },
+        "y1": {
+          "title": "Y1",
+          "type": "number"
+        },
+        "x2": {
+          "title": "X2",
+          "type": "number"
+        },
+        "y2": {
+          "title": "Y2",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x1",
+        "y1",
+        "x2",
+        "y2"
+      ],
+      "title": "Box",
+      "type": "object"
+    },
+    "CameraPose": {
+      "properties": {
+        "height_m": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Height M"
+        },
+        "tilt_deg": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tilt Deg"
+        },
+        "fov_class": {
+          "anyOf": [
+            {
+              "enum": [
+                "narrow",
+                "normal",
+                "wide",
+                "fisheye"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fov Class"
+        },
+        "confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "title": "CameraPose",
+      "type": "object"
+    },
+    "ExitZone": {
+      "properties": {
+        "box": {
+          "$ref": "#/$defs/Box"
+        },
+        "direction_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direction Hint"
+        },
+        "leads_to_tile_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Leads To Tile Hint"
+        },
+        "confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "box"
+      ],
+      "title": "ExitZone",
+      "type": "object"
+    },
+    "Modality": {
+      "enum": [
+        "rgb",
+        "lowlight_rgb",
+        "ir",
+        "thermal"
+      ],
+      "title": "Modality",
+      "type": "string"
+    },
+    "ReflectiveSurface": {
+      "description": "E-GATE-06 / E-DET-04: masks the tracker uses to suppress ghost tubes; also the\ndesigned path for reflection-based inspect.",
+      "properties": {
+        "box": {
+          "$ref": "#/$defs/Box"
+        },
+        "kind": {
+          "enum": [
+            "mirror",
+            "glass",
+            "metal",
+            "screen",
+            "water",
+            "other"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "reflects_zone_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reflects Zone Hint"
+        },
+        "confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "box",
+        "kind"
+      ],
+      "title": "ReflectiveSurface",
+      "type": "object"
+    }
+  },
+  "description": "Calibration output for one camera in one lighting regime. Nothing here is a\nfact; every item is a hypothesis until confirmed by the walk or observation.",
+  "properties": {
+    "camera_id": {
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "regime": {
+      "$ref": "#/$defs/Modality"
+    },
+    "tile_hypothesis": {
+      "title": "Tile Hypothesis",
+      "type": "string"
+    },
+    "tile_name_proposal": {
+      "title": "Tile Name Proposal",
+      "type": "string"
+    },
+    "tile_confidence": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Tile Confidence",
+      "type": "number"
+    },
+    "assets": {
+      "items": {
+        "$ref": "#/$defs/Asset"
+      },
+      "title": "Assets",
+      "type": "array"
+    },
+    "actuators": {
+      "items": {
+        "$ref": "#/$defs/Actuator"
+      },
+      "title": "Actuators",
+      "type": "array"
+    },
+    "light_sources": {
+      "items": {
+        "$ref": "#/$defs/Box"
+      },
+      "title": "Light Sources",
+      "type": "array"
+    },
+    "exits": {
+      "items": {
+        "$ref": "#/$defs/ExitZone"
+      },
+      "title": "Exits",
+      "type": "array"
+    },
+    "reflective_surfaces": {
+      "items": {
+        "$ref": "#/$defs/ReflectiveSurface"
+      },
+      "title": "Reflective Surfaces",
+      "type": "array"
+    },
+    "blind_regions": {
+      "items": {
+        "$ref": "#/$defs/Box"
+      },
+      "title": "Blind Regions",
+      "type": "array"
+    },
+    "media_zones": {
+      "items": {
+        "$ref": "#/$defs/Box"
+      },
+      "title": "Media Zones",
+      "type": "array"
+    },
+    "floor_polygon": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": "number"
+          },
+          {
+            "type": "number"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Floor Polygon",
+      "type": "array"
+    },
+    "ground_points": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": "number"
+          },
+          {
+            "type": "number"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Ground Points",
+      "type": "array"
+    },
+    "camera_pose": {
+      "$ref": "#/$defs/CameraPose"
+    },
+    "model_used": {
+      "title": "Model Used",
+      "type": "string"
+    },
+    "produced_at_ms": {
+      "title": "Produced At Ms",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "camera_id",
+    "regime",
+    "tile_hypothesis",
+    "tile_name_proposal",
+    "model_used",
+    "produced_at_ms"
+  ],
+  "title": "SceneCard",
+  "type": "object"
+}

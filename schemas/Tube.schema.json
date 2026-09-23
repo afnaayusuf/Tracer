@@ -1,0 +1,404 @@
+{
+  "$defs": {
+    "Attributes": {
+      "description": "Writer-VLM output for one crop. E-FOV-05: in non-color modalities every color\nfield must be None with color_reason='ir_mode'; the grammar and this validator\nboth enforce it so a monochrome crop can never yield 'red shirt'.",
+      "properties": {
+        "modality": {
+          "$ref": "#/$defs/Modality"
+        },
+        "top_color": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Color"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bottom_color": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Color"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "top_tone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tone"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bottom_tone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tone"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "color_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "ir_mode",
+                "not_visible",
+                "low_confidence"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Color Reason"
+        },
+        "carried_item": {
+          "anyOf": [
+            {
+              "maxLength": 60,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Carried Item"
+        },
+        "carried_item_confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Carried Item Confidence",
+          "type": "number"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 240,
+          "title": "Description",
+          "type": "string"
+        },
+        "enhanced": {
+          "default": false,
+          "title": "Enhanced",
+          "type": "boolean"
+        },
+        "confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "modality"
+      ],
+      "title": "Attributes",
+      "type": "object"
+    },
+    "Box": {
+      "properties": {
+        "x1": {
+          "title": "X1",
+          "type": "number"
+        },
+        "y1": {
+          "title": "Y1",
+          "type": "number"
+        },
+        "x2": {
+          "title": "X2",
+          "type": "number"
+        },
+        "y2": {
+          "title": "Y2",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x1",
+        "y1",
+        "x2",
+        "y2"
+      ],
+      "title": "Box",
+      "type": "object"
+    },
+    "CamTime": {
+      "description": "E-ING-01 / E-ING-06: a timestamp is the camera's own UTC reading plus the\nestimated offset to the site reference clock. Fusion and the fact miner use\ncorrected_ms(); display converts to local time at the edge of the system only.",
+      "properties": {
+        "cam_utc_ms": {
+          "title": "Cam Utc Ms",
+          "type": "integer"
+        },
+        "offset_ms": {
+          "default": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "offset_confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Offset Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "cam_utc_ms"
+      ],
+      "title": "CamTime",
+      "type": "object"
+    },
+    "Color": {
+      "enum": [
+        "black",
+        "white",
+        "gray",
+        "red",
+        "orange",
+        "yellow",
+        "green",
+        "blue",
+        "purple",
+        "pink",
+        "brown",
+        "multicolor"
+      ],
+      "title": "Color",
+      "type": "string"
+    },
+    "FloorPoint": {
+      "description": "World coordinates on the ground plane. E-TUBE-12: when feet are occluded the\nsource is 'fallback_bbox_bottom' and uncertainty_m widens; fusion must read it.",
+      "properties": {
+        "x_m": {
+          "title": "X M",
+          "type": "number"
+        },
+        "y_m": {
+          "title": "Y M",
+          "type": "number"
+        },
+        "tile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tile Id"
+        },
+        "uncertainty_m": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Uncertainty M",
+          "type": "number"
+        },
+        "source": {
+          "default": "homography",
+          "enum": [
+            "homography",
+            "fallback_bbox_bottom",
+            "manual"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "x_m",
+        "y_m"
+      ],
+      "title": "FloorPoint",
+      "type": "object"
+    },
+    "Modality": {
+      "enum": [
+        "rgb",
+        "lowlight_rgb",
+        "ir",
+        "thermal"
+      ],
+      "title": "Modality",
+      "type": "string"
+    },
+    "Tone": {
+      "enum": [
+        "light",
+        "mid",
+        "dark"
+      ],
+      "title": "Tone",
+      "type": "string"
+    },
+    "TubeState": {
+      "enum": [
+        "born",
+        "active",
+        "occluded",
+        "exited",
+        "lost",
+        "dead"
+      ],
+      "title": "TubeState",
+      "type": "string"
+    }
+  },
+  "description": "Lifecycle record for one object in one camera. entity_id is assigned by fusion.",
+  "properties": {
+    "tube_id": {
+      "title": "Tube Id",
+      "type": "string"
+    },
+    "camera_id": {
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "tile_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tile Id"
+    },
+    "entity_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Entity Id"
+    },
+    "named": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Named"
+    },
+    "class_label": {
+      "title": "Class Label",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/TubeState",
+      "default": "born"
+    },
+    "born": {
+      "$ref": "#/$defs/CamTime"
+    },
+    "last_seen": {
+      "$ref": "#/$defs/CamTime"
+    },
+    "box": {
+      "$ref": "#/$defs/Box"
+    },
+    "foot": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FloorPoint"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "zone_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Zone Ids",
+      "type": "array"
+    },
+    "modality": {
+      "$ref": "#/$defs/Modality",
+      "default": "rgb"
+    },
+    "keyframe_refs": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Keyframe Refs",
+      "type": "array"
+    },
+    "attributes": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Attributes"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "occluded_since_ms": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Occluded Since Ms"
+    },
+    "merge_candidates": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Merge Candidates",
+      "type": "array"
+    },
+    "reflection_suspect": {
+      "default": false,
+      "title": "Reflection Suspect",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tube_id",
+    "camera_id",
+    "class_label",
+    "born",
+    "last_seen",
+    "box"
+  ],
+  "title": "Tube",
+  "type": "object"
+}

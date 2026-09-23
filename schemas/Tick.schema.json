@@ -1,0 +1,292 @@
+{
+  "$defs": {
+    "Box": {
+      "properties": {
+        "x1": {
+          "title": "X1",
+          "type": "number"
+        },
+        "y1": {
+          "title": "Y1",
+          "type": "number"
+        },
+        "x2": {
+          "title": "X2",
+          "type": "number"
+        },
+        "y2": {
+          "title": "Y2",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x1",
+        "y1",
+        "x2",
+        "y2"
+      ],
+      "title": "Box",
+      "type": "object"
+    },
+    "CamTime": {
+      "description": "E-ING-01 / E-ING-06: a timestamp is the camera's own UTC reading plus the\nestimated offset to the site reference clock. Fusion and the fact miner use\ncorrected_ms(); display converts to local time at the edge of the system only.",
+      "properties": {
+        "cam_utc_ms": {
+          "title": "Cam Utc Ms",
+          "type": "integer"
+        },
+        "offset_ms": {
+          "default": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "offset_confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Offset Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "cam_utc_ms"
+      ],
+      "title": "CamTime",
+      "type": "object"
+    },
+    "FloorPoint": {
+      "description": "World coordinates on the ground plane. E-TUBE-12: when feet are occluded the\nsource is 'fallback_bbox_bottom' and uncertainty_m widens; fusion must read it.",
+      "properties": {
+        "x_m": {
+          "title": "X M",
+          "type": "number"
+        },
+        "y_m": {
+          "title": "Y M",
+          "type": "number"
+        },
+        "tile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tile Id"
+        },
+        "uncertainty_m": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Uncertainty M",
+          "type": "number"
+        },
+        "source": {
+          "default": "homography",
+          "enum": [
+            "homography",
+            "fallback_bbox_bottom",
+            "manual"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "x_m",
+        "y_m"
+      ],
+      "title": "FloorPoint",
+      "type": "object"
+    },
+    "Modality": {
+      "enum": [
+        "rgb",
+        "lowlight_rgb",
+        "ir",
+        "thermal"
+      ],
+      "title": "Modality",
+      "type": "string"
+    },
+    "Provenance": {
+      "description": "E-STO-04 / E-STO-05: every persisted record knows which schema and which KB\nversion compiled it, so a hand-off decision can be reproduced later.",
+      "properties": {
+        "schema_version": {
+          "default": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "kb_version": {
+          "minimum": 0,
+          "title": "Kb Version",
+          "type": "integer"
+        },
+        "pipeline_git": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pipeline Git"
+        }
+      },
+      "required": [
+        "kb_version"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "TubeSnapshot": {
+      "description": "Per-tick view of a tube (what a Tick carries).",
+      "properties": {
+        "tube_id": {
+          "title": "Tube Id",
+          "type": "string"
+        },
+        "class_label": {
+          "title": "Class Label",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/TubeState"
+        },
+        "box": {
+          "$ref": "#/$defs/Box"
+        },
+        "foot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FloorPoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "zone_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Zone Ids",
+          "type": "array"
+        },
+        "det_confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Det Confidence",
+          "type": "number"
+        },
+        "det_source": {
+          "default": "detector",
+          "enum": [
+            "detector",
+            "heartbeat",
+            "predicted"
+          ],
+          "title": "Det Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tube_id",
+        "class_label",
+        "state",
+        "box"
+      ],
+      "title": "TubeSnapshot",
+      "type": "object"
+    },
+    "TubeState": {
+      "enum": [
+        "born",
+        "active",
+        "occluded",
+        "exited",
+        "lost",
+        "dead"
+      ],
+      "title": "TubeState",
+      "type": "string"
+    }
+  },
+  "description": "Fast-path record. Committed within the latency budget with geometry + event ids\nonly; semantic attributes arrive later as EnrichmentPatch (R4).",
+  "properties": {
+    "camera_id": {
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "tile_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tile Id"
+    },
+    "tick_index": {
+      "minimum": 0,
+      "title": "Tick Index",
+      "type": "integer"
+    },
+    "t_start": {
+      "$ref": "#/$defs/CamTime"
+    },
+    "t_end": {
+      "$ref": "#/$defs/CamTime"
+    },
+    "modality": {
+      "$ref": "#/$defs/Modality",
+      "default": "rgb"
+    },
+    "tubes": {
+      "items": {
+        "$ref": "#/$defs/TubeSnapshot"
+      },
+      "title": "Tubes",
+      "type": "array"
+    },
+    "event_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Event Ids",
+      "type": "array"
+    },
+    "scene_state": {
+      "additionalProperties": true,
+      "title": "Scene State",
+      "type": "object"
+    },
+    "gate_energy": {
+      "default": 0.0,
+      "minimum": 0.0,
+      "title": "Gate Energy",
+      "type": "number"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    }
+  },
+  "required": [
+    "camera_id",
+    "tick_index",
+    "t_start",
+    "t_end",
+    "provenance"
+  ],
+  "title": "Tick",
+  "type": "object"
+}

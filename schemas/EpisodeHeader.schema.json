@@ -1,0 +1,100 @@
+{
+  "$defs": {
+    "CamTime": {
+      "description": "E-ING-01 / E-ING-06: a timestamp is the camera's own UTC reading plus the\nestimated offset to the site reference clock. Fusion and the fact miner use\ncorrected_ms(); display converts to local time at the edge of the system only.",
+      "properties": {
+        "cam_utc_ms": {
+          "title": "Cam Utc Ms",
+          "type": "integer"
+        },
+        "offset_ms": {
+          "default": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "offset_confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Offset Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "cam_utc_ms"
+      ],
+      "title": "CamTime",
+      "type": "object"
+    },
+    "Provenance": {
+      "description": "E-STO-04 / E-STO-05: every persisted record knows which schema and which KB\nversion compiled it, so a hand-off decision can be reproduced later.",
+      "properties": {
+        "schema_version": {
+          "default": "0.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "kb_version": {
+          "minimum": 0,
+          "title": "Kb Version",
+          "type": "integer"
+        },
+        "pipeline_git": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pipeline Git"
+        }
+      },
+      "required": [
+        "kb_version"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "kind": {
+      "const": "header",
+      "default": "header",
+      "title": "Kind",
+      "type": "string"
+    },
+    "episode_id": {
+      "title": "Episode Id",
+      "type": "string"
+    },
+    "tile_id": {
+      "title": "Tile Id",
+      "type": "string"
+    },
+    "camera_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Camera Ids",
+      "type": "array"
+    },
+    "t0": {
+      "$ref": "#/$defs/CamTime"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    }
+  },
+  "required": [
+    "episode_id",
+    "tile_id",
+    "camera_ids",
+    "t0",
+    "provenance"
+  ],
+  "title": "EpisodeHeader",
+  "type": "object"
+}
