@@ -29,13 +29,13 @@ cases:
   title: Codec without motion vectors
   trigger: MJPEG or unknown codec stream.
   handling: Gate interface is codec-agnostic; FrameDiffGate fallback at 1 fps; camera profile records gate_mode.
-  status: planned
+  status: implemented
 - id: E-ING-05
   ring: ingest
   title: Resolution or aspect change mid-stream
   trigger: Camera reconfigured; homography and zones now invalid.
-  handling: Detect frame-size change; freeze fusion for that camera; raise camera_moved_suspect; require recalibration.
-  status: planned
+  handling: Reader SizeGuard flags the change; EventCompiler.on_size_change emits camera_moved_suspect; fusion freezes that camera until recalibration (week 3).
+  status: implemented
 - id: E-ING-06
   ring: ingest
   title: Timezone and DST
@@ -47,7 +47,7 @@ cases:
   title: Duplicate or out-of-order frames
   trigger: RTSP jitter delivers repeated or reordered PTS.
   handling: Dedupe by PTS per camera; drop frames older than the last processed tick.
-  status: planned
+  status: implemented
 # ---------------- ring 0 gate ----------------
 - id: E-GATE-01
   ring: ring0

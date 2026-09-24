@@ -141,6 +141,13 @@ class EventCompiler:
         st.present = False
         return events
 
+    # ---------------- ingest ----------------
+    def on_size_change(self, t_ms: int, old: tuple[int, int] | None, new: tuple[int, int]) -> list[Event]:
+        """E-ING-05: resolution change => homography and zones invalid; same flag as a moved camera."""
+        return [self._event(EventType.camera_moved_suspect, t_ms, None, [],
+                            payload={"reason": "resolution_change", "old": list(old or ()), "new": list(new)},
+                            confidence=0.95)]
+
     # ---------------- gate / scene state ----------------
     def on_gate(self, g: GateResult) -> list[Event]:
         events: list[Event] = []

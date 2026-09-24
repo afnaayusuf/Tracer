@@ -1,6 +1,6 @@
 # Edge-case registry
 
-Generated from `edge_cases.yaml` by `make edge-doc`. 72 cases, 27 implemented and tested.
+Generated from `edge_cases.yaml` by `make edge-doc`. 72 cases, 30 implemented and tested.
 
 Status: **implemented** = code path exists and a test marked `@pytest.mark.edge("ID")` exercises it; **planned** = month-1 scope; **deferred** = tracked, not month 1.
 
@@ -10,18 +10,18 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 |---|---|---|---|---|---|
 | E-ING-01 | Camera clocks disagree | Cameras drift seconds apart; fusion hand-offs and the ±1 s fact-miner window fail. | Every timestamp is CamTime{cam_utc_ms, offset_ms, offset_confidence}; offsets estimated in the calibration walk and re-estimated from hand-offs; fusion uses corrected_ms() only. | implemented | test_schemas.py::test_camtime_offset_aligns_two_cameras |
 | E-ING-02 | Stream drops or reconnects | RTSP disconnect mid-episode. | signal_lost/signal_restored events; open episode on that camera closes with status=truncated; tubes go to lost, not exited. | implemented | test_episode.py::test_signal_loss_truncates_episode |
-| E-ING-03 | Variable or dropped frame rate | Camera throttles under load; fps changes. | Ticks are wall-clock windows (t_start,t_end), never frame indices; tube age computed from corrected time. | implemented | test_schemas.py::test_tick_is_wall_clock_window_not_frame_index |
-| E-ING-04 | Codec without motion vectors | MJPEG or unknown codec stream. | Gate interface is codec-agnostic; FrameDiffGate fallback at 1 fps; camera profile records gate_mode. | planned | — |
-| E-ING-05 | Resolution or aspect change mid-stream | Camera reconfigured; homography and zones now invalid. | Detect frame-size change; freeze fusion for that camera; raise camera_moved_suspect; require recalibration. | planned | — |
+| E-ING-03 | Variable or dropped frame rate | Camera throttles under load; fps changes. | Ticks are wall-clock windows (t_start,t_end), never frame indices; tube age computed from corrected time. | implemented | test_ingest.py::test_pts_filter_samples_to_target_fps<br>test_schemas.py::test_tick_is_wall_clock_window_not_frame_index |
+| E-ING-04 | Codec without motion vectors | MJPEG or unknown codec stream. | Gate interface is codec-agnostic; FrameDiffGate fallback at 1 fps; camera profile records gate_mode. | implemented | test_ingest.py::test_codec_routes_to_gate_mode |
+| E-ING-05 | Resolution or aspect change mid-stream | Camera reconfigured; homography and zones now invalid. | Reader SizeGuard flags the change; EventCompiler.on_size_change emits camera_moved_suspect; fusion freezes that camera until recalibration (week 3). | implemented | test_ingest.py::test_resolution_change_is_flagged_and_becomes_camera_moved_suspect |
 | E-ING-06 | Timezone and DST | "Yesterday afternoon" across a DST switch or a site in another timezone. | All storage in UTC ms; site timezone stored in KB; agent resolves local windows explicitly and echoes them in the answer. | implemented | test_schemas.py::test_timestamps_are_utc_ms_only |
-| E-ING-07 | Duplicate or out-of-order frames | RTSP jitter delivers repeated or reordered PTS. | Dedupe by PTS per camera; drop frames older than the last processed tick. | planned | — |
+| E-ING-07 | Duplicate or out-of-order frames | RTSP jitter delivers repeated or reordered PTS. | Dedupe by PTS per camera; drop frames older than the last processed tick. | implemented | test_ingest.py::test_pts_filter_drops_duplicates_and_reordered_frames<br>test_ingest.py::test_reader_to_gate_on_synthetic_clip |
 
 ## Ring 0 · bitstream / motion gate
 
 | ID | Case | Trigger | Handling | Status | Tests |
 |---|---|---|---|---|---|
 | E-GATE-01 | Stationary object is invisible to the gate | Person stops moving; bag placed and left; fallen person still. | Heartbeat detections on I-frames (1–2 s active tiles, 10–30 s quiet, always on asset homes) keep tubes alive; not the gate's job. | implemented | test_gate.py::test_stationary_object_fades_from_gate_by_design<br>test_tubes.py::test_heartbeat_detection_keeps_stationary_track_active |
-| E-GATE-02 | Lighting change looks like whole-frame motion | Light switch, IR-cut toggle, cloud passes. | Global luminance step detected before differencing; emitted as illumination_change scene-state event; blobs suppressed for that update. | implemented | test_events.py::test_gate_results_become_scene_state_events<br>test_gate.py::test_light_switch_is_luma_step_not_motion |
+| E-GATE-02 | Lighting change looks like whole-frame motion | Light switch, IR-cut toggle, cloud passes. | Global luminance step detected before differencing; emitted as illumination_change scene-state event; blobs suppressed for that update. | implemented | test_events.py::test_gate_results_become_scene_state_events<br>test_gate.py::test_light_switch_is_luma_step_not_motion<br>test_ingest.py::test_reader_to_gate_on_synthetic_clip |
 | E-GATE-03 | Foliage, rain, insects, sensor noise | Persistent low-level motion that is not an object. | Adaptive noise floor (median block energy over history) × k; MV-field coherence test once MVGate lands. | implemented | test_gate.py::test_adaptive_noise_floor_ignores_sensor_noise_but_finds_object |
 | E-GATE-04 | Camera shake or PTZ move | Most of the frame changes at once. | active_fraction > threshold => global_motion; blobs suppressed, background frozen; sustained => camera_moved_suspect. | implemented | test_gate.py::test_camera_shake_is_global_motion_and_suppresses_blobs |
 | E-GATE-05 | Very slow motion under threshold | Someone creeping; object slid slowly. | Heartbeat detections catch state deltas the gate misses; gate FN rate is a tracked metric. | planned | — |

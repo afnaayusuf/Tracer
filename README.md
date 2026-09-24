@@ -14,7 +14,7 @@ make check                 # tests + edge-case coverage + schema export + regist
 python bench/slice_cpu.py  # gate -> tubes -> events -> episode JSONL on a synthetic scene
 ```
 
-GPU work (`pip install -e ".[perception]"`) runs from Colab: `colab run --gpu L4 bench/ring1_detect.py`.
+Working from Colab only? See `colab/README.md`: one env cell, one bootstrap cell, one session cell.
 
 ## Layout
 
@@ -25,6 +25,7 @@ vi/detect/     Ring 1  — Detector protocol; RFDETRDetector (lazy import)
 vi/tubes/      Ring 2  — Tracker protocol; SimpleIoUTracker (slice); geometry.project_foot
 vi/events/     Ring 3a — Zone, EventCompiler (deterministic predicates, heartbeats, scene state)
 vi/episode/    EpisodeWriter (append-only JSONL, idempotent), should_soft_cut
+vi/ingest/     VideoReader (PyAV, file/RTSP), PTSFilter, SizeGuard, gate_mode_for_codec, synthetic clips
 vi/harness/    edge-case registry loader, coverage checker, EDGE_CASES.md renderer
 bench/         one script per ring; each prints one benchmark-table row
 tests/         every implemented edge case has a test marked @pytest.mark.edge("E-…")
