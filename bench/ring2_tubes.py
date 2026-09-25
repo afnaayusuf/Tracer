@@ -1,7 +1,7 @@
 """Ring 2 bench: tracker vs ground truth -> MOTA / IDF1 / IDSW / fragmentation. Baseline for the
 ByteTrack rewrite. Rows to data/bench/ring2.jsonl.
 
-  python bench/ring2_tubes.py --synthetic
+  python bench/ring2_tubes.py --synthetic --tracker byte --sample-every 5
   python bench/ring2_tubes.py --mot17 /content/drive/MyDrive/MOT17/train/MOT17-02-FRCNN --fps 30
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ import numpy as np
 from vi.detect import Detection
 from vi.eval import evaluate_mot, load_mot_txt
 from vi.schemas import Box
-from vi.tubes import SimpleIoUTracker
+from vi.tubes import TRACKERS
 
 
 def synthetic_gt(frames: int = 120, seed: int = 0):
@@ -35,9 +35,11 @@ def synthetic_gt(frames: int = 120, seed: int = 0):
     return gt
 
 
-def run_tracker(dets_by_frame, fps: float, iou_thr: float, max_occluded_ms: int, drop_rate: float = 0.0, seed: int = 0):
+def run_tracker(dets_by_frame, fps: float, iou_thr: float, max_occluded_ms: int, drop_rate: float = 0.0,
+                seed: int = 0, tracker: str = "simple"):
     rng = np.random.default_rng(seed)
-    tr = SimpleIoUTracker("cam1", iou_thr=iou_thr, max_occluded_ms=max_occluded_ms)
+    kw = {"iou_thr": iou_thr} if tracker == "simple" else {}
+    tr = TRACKERS[tracker]("cam1", max_occluded_ms=max_occluded_ms, **kw)
     pred: dict[int, list] = {}
     id_map: dict[str, int] = {}
     for f in sorted(dets_by_frame):
@@ -59,6 +61,7 @@ def main() -> None:
     ap.add_argument("--max-occluded-ms", type=int, default=2000)
     ap.add_argument("--det-min-conf", type=float, default=0.5)
     ap.add_argument("--drop-rate", type=float, default=0.0, help="synthetic: random missed detections")
+    ap.add_argument("--tracker", choices=sorted(TRACKERS), default="simple")
     a = ap.parse_args()
     if a.synthetic:
         gt = synthetic_gt()
@@ -74,9 +77,9 @@ def main() -> None:
     if a.sample_every > 1:
         gt = {f: v for f, v in gt.items() if f % a.sample_every == 0}
         dets = {f: v for f, v in dets.items() if f % a.sample_every == 0}
-    pred = run_tracker(dets, a.fps, a.iou_thr, a.max_occluded_ms, a.drop_rate)
+    pred = run_tracker(dets, a.fps, a.iou_thr, a.max_occluded_ms, a.drop_rate, tracker=a.tracker)
     res = evaluate_mot(gt, pred)
-    row = {"ring": 2, "tracker": "SimpleIoUTracker", "sequence": name, "fps": a.fps, "sample_every": a.sample_every,
+    row = {"ring": 2, "tracker": TRACKERS[a.tracker].__name__, "sequence": name, "fps": a.fps, "sample_every": a.sample_every,
            "effective_fps": round(a.fps / a.sample_every, 2), "iou_thr": a.iou_thr, "max_occluded_ms": a.max_occluded_ms,
            "drop_rate": a.drop_rate, **res.as_row(), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     out = Path("data/bench"); out.mkdir(parents=True, exist_ok=True)

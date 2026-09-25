@@ -1,7 +1,8 @@
 """Real-footage slice (Day 4): reader -> gate -> ROIs -> RF-DETR -> tubes -> events -> episode file,
 with a native-res keyframe saved at every tube birth. One row to data/bench/slice_gpu.jsonl.
 
-  python bench/slice_gpu.py --source /content/HI_DEF_VIDEO.mp4 --fps 2 --model nano
+  python bench/slice_gpu.py --source /content/HI_DEF_VIDEO.mp4 --fps 4 --model nano            # ByteTracker
+  python bench/slice_gpu.py --source /content/HI_DEF_VIDEO.mp4 --fps 4 --tracker simple --threshold 0.5
   python bench/slice_gpu.py --source clip.mp4 --zones data/zones/cam1.json --tile lobby
 """
 from __future__ import annotations
@@ -9,6 +10,8 @@ from __future__ import annotations
 import argparse
 import json
 import time
+
+import numpy as np
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +24,7 @@ from vi.gate import FrameDiffGate
 from vi.ingest import VideoReader
 from vi.schemas import CamTime, Provenance, Tick, TubeSnapshot
 from vi.schemas.episode import CastMember, EpisodeStatus
-from vi.tubes import SimpleIoUTracker
+from vi.tubes import TRACKERS
 
 
 def main() -> None:
@@ -31,7 +34,10 @@ def main() -> None:
     ap.add_argument("--tile", default="tile1")
     ap.add_argument("--model", default="nano")
     ap.add_argument("--fps", type=float, default=4.0, help="R11 range 2-5; IoU-only tracking collapses below ~4")
-    ap.add_argument("--threshold", type=float, default=0.5)
+    ap.add_argument("--threshold", type=float, default=0.1,
+                    help="detector floor; ByteTracker re-attaches 0.1-0.5 detections and births only >=0.5")
+    ap.add_argument("--tracker", choices=sorted(TRACKERS), default="byte")
+    ap.add_argument("--warmup", type=int, default=3, help="frames excluded from timing (JIT profiling runs)")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--max-frames", type=int, default=600)
     ap.add_argument("--zones", default=None, help="JSON zones file; default = edge exits + centre floor")
@@ -49,6 +55,7 @@ def main() -> None:
     zones = None
     tracker = compiler = writer = ep = None
     stage = Counter()
+    detect_ms: list[float] = []
     ev_types: Counter = Counter()
     births = 0
     closed_all = []
@@ -66,8 +73,9 @@ def main() -> None:
             from vi.schemas import Box
             exits = [Box(x1=min(p[0] for p in poly), y1=min(p[1] for p in poly),
                          x2=max(p[0] for p in poly), y2=max(p[1] for p in poly)) for poly in exit_boxes]
-            tracker = SimpleIoUTracker(a.camera, iou_thr=a.iou_thr, max_occluded_ms=a.max_occluded_ms,
-                                       exit_boxes=exits, keyframe_sink=kf.make_sink(lambda: current["frame"]))
+            tkw = {"iou_thr": a.iou_thr} if a.tracker == "simple" else {}
+            tracker = TRACKERS[a.tracker](a.camera, max_occluded_ms=a.max_occluded_ms, exit_boxes=exits,
+                                          keyframe_sink=kf.make_sink(lambda: current["frame"]), **tkw)
             compiler = EventCompiler(a.camera, zones, enter_ticks=1, exit_ticks=2, dwell_ms=5000, tile_id=a.tile)
             writer = EpisodeWriter(a.out)
             ep = writer.open(a.tile, [a.camera], CamTime(cam_utc_ms=fr.pts_ms), prov)
@@ -84,7 +92,10 @@ def main() -> None:
             for r, d in zip(chunk, det.detect_batch(crops)[:real]):
                 dets += remap_detections(d, r, w, h)
         dets = [d for d in dets if is_tube_class(d.class_label)]
-        stage["detect"] += time.perf_counter() - t0
+        dt_detect = time.perf_counter() - t0
+        if frames >= a.warmup:
+            stage["detect"] += dt_detect
+            detect_ms.append(dt_detect * 1000)
         t0 = time.perf_counter()
         before = len(tracker._tracks)
         live, closed = tracker.update(dets, fr.pts_ms)
@@ -115,9 +126,14 @@ def main() -> None:
     st = reader.stats
     row = {
         "ring": "slice", "source": Path(a.source).name, "model": f"rf-detr-{a.model}", "sampled_fps": a.fps,
+        "tracker": a.tracker, "det_threshold": a.threshold,
         "frames": frames, "decode_ms_per_frame": round(st.decode_ms_total / frames, 2),
-        **{f"{k}_ms_per_frame": round(v * 1000 / frames, 2) for k, v in stage.items()},
+        **{f"{k}_ms_per_frame": round(v * 1000 / frames, 2) for k, v in stage.items() if k != "detect"},
+        "detect_ms_p50": round(float(np.median(detect_ms)), 2) if detect_ms else None,
+        "detect_ms_p95": round(float(np.percentile(detect_ms, 95)), 2) if detect_ms else None,
         "tubes_total": len(tubes), "tubes_live_at_end": len(tracker._tracks),
+        "person_tubes": sum(1 for t in tubes if t.class_label == "person"),
+        "merge_candidates_flagged": sum(1 for t in tubes if t.merge_candidates),
         "tubes_by_final_state": dict(Counter(t.state.value for t in tubes)),
         "classes": dict(Counter(t.class_label for t in tubes)),
         "events": dict(ev_types), "keyframes_saved": kf.saved, "episode_id": ep,

@@ -217,8 +217,8 @@ cases:
   ring: ring2
   title: Fragmentation at sampled frame rate
   trigger: Decode at 2 fps means a walking person moves half a box width between ticks; IoU association breaks the tube.
-  handling: dt-aware Kalman prediction (ByteTrack rewrite) and a lower IoU gate; measured as fragmentation_ratio and idsw in bench/ring2_tubes.py against the SimpleIoUTracker baseline.
-  status: planned
+  handling: ByteTracker with dt-aware Kalman, buffered IoU and a first-tick centre gate keeps fragmentation at 1.0 down to ~4-6 fps (synthetic); below ~3 fps motion-only association is ambiguous by construction, so active tiles decode at >=4 fps and 2 fps is for quiet tiles only.
+  status: implemented
 - id: E-TUBE-12
   ring: ring2
   title: Feet occluded, foot point wrong
@@ -231,6 +231,12 @@ cases:
   title: Zone boundary jitter
   trigger: Foot point oscillates on a zone edge.
   handling: 'Hysteresis: enter after N consecutive inside ticks, exit after N outside.'
+  status: implemented
+- id: E-EVT-10
+  ring: ring3a
+  title: Everyone in frame at episode open "enters"
+  trigger: First tick births every visible tube inside a zone; enter_zone fires for all of them at once.
+  handling: EventCompiler seeds zone memberships silently on its first tick; enter_zone means a boundary was crossed during the episode.
   status: implemented
 - id: E-EVT-02
   ring: ring3a

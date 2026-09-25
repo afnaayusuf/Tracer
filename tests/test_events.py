@@ -27,6 +27,7 @@ def outside(tid):  # foot point (150, 250)
 @pytest.mark.edge("E-EVT-01")
 def test_zone_hysteresis_filters_boundary_jitter():
     ec = EventCompiler("c1", [zone("z1")], enter_ticks=2, exit_ticks=2)
+    ec.on_tick([], -500)                        # episode opens on an empty tile
     evs = []
     for i in range(6):   # jitter: in, out, in, out, ...
         evs += ec.on_tick([inside("a") if i % 2 == 0 else outside("a")], i * 500)
@@ -40,6 +41,7 @@ def test_zone_hysteresis_filters_boundary_jitter():
 @pytest.mark.edge("E-EVT-03")
 def test_pickup_requires_absence_with_nobody_in_zone():
     ec = EventCompiler("c1", [zone("shelf", kind="asset_home", asset="bike_keys")], enter_ticks=1, exit_ticks=1)
+    ec.on_tick([], 0)
     assert ec.on_heartbeat("shelf", True, 0, persons_inside=[]) == []
     ec.on_tick([inside("emma")], 1000)
     # shelf hidden behind Emma: heartbeat says absent while she is inside -> no event
@@ -64,6 +66,8 @@ def test_missing_asset_with_no_visitor_does_not_blame_anyone():
 def test_overlapping_cameras_share_dedupe_key_but_not_event_id():
     a = EventCompiler("camA", [zone("door", cam="camA")], enter_ticks=1)
     b = EventCompiler("camB", [zone("door", cam="camB")], enter_ticks=1)
+    a.on_tick([], 0)
+    b.on_tick([], 0)
     ea = a.on_tick([inside("tA")], 1000)[0]
     eb = b.on_tick([inside("tB")], 1300)[0]
     assert ea.dedupe_key == eb.dedupe_key and ea.event_id != eb.event_id
@@ -83,7 +87,18 @@ def test_gate_results_become_scene_state_events():
 
 def test_dwell_fires_once():
     ec = EventCompiler("c1", [zone("z1")], enter_ticks=1, dwell_ms=2000)
+    ec.on_tick([], -500)
     evs = []
     for i in range(6):
         evs += ec.on_tick([inside("a")], i * 1000)
     assert [e.type for e in evs] == [EventType.enter_zone, EventType.dwell]
+
+
+@pytest.mark.edge("E-EVT-10")
+def test_tubes_present_at_episode_open_do_not_enter():
+    ec = EventCompiler("c1", [zone("z1")], enter_ticks=1, exit_ticks=1)
+    assert ec.on_tick([inside("a"), inside("b")], 0) == []                 # already inside: no enter
+    assert ec.on_tick([inside("a"), inside("b")], 500) == []
+    evs = ec.on_tick([outside("a"), inside("b"), inside("c")], 1000)      # a leaves, c arrives
+    assert sorted(e.type for e in evs) == sorted([EventType.exit_zone, EventType.enter_zone])
+    assert [e.subject_tube_ids for e in evs if e.type == EventType.enter_zone] == [["c"]]

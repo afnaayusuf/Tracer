@@ -62,6 +62,7 @@ class EventCompiler:
             z.zone_id: _AssetState() for z in self.zones.values() if z.kind == "asset_home"}
         self._global_run = 0
         self._moved_fired = False
+        self._ticks_seen = 0
 
     def _t(self, t_ms: int) -> CamTime:
         return CamTime(cam_utc_ms=t_ms, offset_ms=self.offset_ms)
@@ -80,6 +81,20 @@ class EventCompiler:
     def on_tick(self, tubes: list[TubeSnapshot], t_ms: int) -> list[Event]:
         events: list[Event] = []
         live = {s.tube_id for s in tubes}
+        first_tick = self._ticks_seen == 0
+        self._ticks_seen += 1
+        if first_tick:
+            # E-EVT-10: whoever is already in frame when the episode opens did not "enter";
+            # seed zone memberships silently so enter_zone means a boundary was crossed.
+            for snap in tubes:
+                foot = snap.box.foot_point()
+                for z in self.zones.values():
+                    if z.contains(foot):
+                        m = self._mem.setdefault((snap.tube_id, z.zone_id), _Membership())
+                        m.is_inside, m.inside_run, m.entered_at_ms = True, self.enter_ticks, t_ms
+                        if z.kind == "asset_home" and snap.class_label in PERSON_CLASSES:
+                            self._assets[z.zone_id].visitors[snap.tube_id] = t_ms
+            return events
         for snap in tubes:
             foot = snap.box.foot_point()
             for z in self.zones.values():

@@ -1,6 +1,6 @@
 # Edge-case registry
 
-Generated from `edge_cases.yaml` by `make edge-doc`. 74 cases, 32 implemented and tested.
+Generated from `edge_cases.yaml` by `make edge-doc`. 75 cases, 34 implemented and tested.
 
 Status: **implemented** = code path exists and a test marked `@pytest.mark.edge("ID")` exercises it; **planned** = month-1 scope; **deferred** = tracked, not month 1.
 
@@ -57,7 +57,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | E-TUBE-08 | Appearance drift within a day | Jacket on/off; bag picked up. | Multiple exemplars per entity; embedding refresh on confident matches; oldest expire. | planned | — |
 | E-TUBE-09 | Carried object is not its own tube | Bag on shoulder; keys in hand. | carried_item attribute on the person tube; object tube only when placed and stationary. | planned | — |
 | E-TUBE-10 | Pets, strollers, wheelchairs | Non-person moving classes; child inside stroller. | Class-specific lifecycle; stroller+child handled as one tube with carried_item=child hint. | deferred | — |
-| E-TUBE-13 | Fragmentation at sampled frame rate | Decode at 2 fps means a walking person moves half a box width between ticks; IoU association breaks the tube. | dt-aware Kalman prediction (ByteTrack rewrite) and a lower IoU gate; measured as fragmentation_ratio and idsw in bench/ring2_tubes.py against the SimpleIoUTracker baseline. | planned | — |
+| E-TUBE-13 | Fragmentation at sampled frame rate | Decode at 2 fps means a walking person moves half a box width between ticks; IoU association breaks the tube. | ByteTracker with dt-aware Kalman, buffered IoU and a first-tick centre gate keeps fragmentation at 1.0 down to ~4-6 fps (synthetic); below ~3 fps motion-only association is ambiguous by construction, so active tiles decode at >=4 fps and 2 fps is for quiet tiles only. | implemented | test_tubes.py::test_bytetracker_survives_sampled_frame_rate_where_iou_only_fragments |
 | E-TUBE-12 | Feet occluded, foot point wrong | Person behind counter. | FloorPoint.source=fallback_bbox_bottom and uncertainty widened; fusion tolerances read it. | implemented | test_tubes.py::test_occluded_feet_widen_uncertainty_and_tag_source |
 
 ## Ring 3a · event compiler
@@ -65,6 +65,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | ID | Case | Trigger | Handling | Status | Tests |
 |---|---|---|---|---|---|
 | E-EVT-01 | Zone boundary jitter | Foot point oscillates on a zone edge. | Hysteresis: enter after N consecutive inside ticks, exit after N outside. | implemented | test_events.py::test_zone_hysteresis_filters_boundary_jitter |
+| E-EVT-10 | Everyone in frame at episode open "enters" | First tick births every visible tube inside a zone; enter_zone fires for all of them at once. | EventCompiler seeds zone memberships silently on its first tick; enter_zone means a boundary was crossed during the episode. | implemented | test_events.py::test_tubes_present_at_episode_open_do_not_enter |
 | E-EVT-02 | Cross-camera event order under clock offset | Kitchen camera 2 s ahead of hallway. | Sort by corrected_ms; hand-off window tolerates offset_confidence. | planned | — |
 | E-EVT-03 | False pickup from occlusion of the shelf | Person stands in front of the asset home; heartbeat cannot see the asset. | Pickup requires asset absent on a heartbeat taken with nobody inside the zone, after a present reading; subject = visitors in between; no visitors => asset_missing_from_home with no blame. | implemented | test_events.py::test_pickup_requires_absence_with_nobody_in_zone<br>test_events.py::test_missing_asset_with_no_visitor_does_not_blame_anyone |
 | E-EVT-04 | Fall vs lying down on purpose | Person lies on sofa/bed. | rest zones from scene card suppress fall; fall requires vertical velocity + pose primitive outside rest zones. | deferred | — |

@@ -48,8 +48,12 @@ Medium–Large (server), Apache-2.0 sizes only. Client nouns via SAM 3 concept +
 at tube-event cadence. Every detection carries a ReID embedding. **MEASURE:** ms per packed
 batch, mAP on ROIs.
 
-**Ring 2 — tubes + fusion.** Per-camera BoT-SORT/ByteTrack from source (MIT originals), motion
-only on edge, appearance-assisted on server. Explicit lifecycle
+**Ring 2 — tubes + fusion.** Per-camera `ByteTracker` written from the papers (dt-aware
+constant-velocity Kalman, two-stage association, buffered IoU, first-tick centre gate; no code
+from the ByteTrack/BoT-SORT repos, whose Kalman file traces to GPL Deep SORT), motion only on
+edge, appearance-assisted on server. Measured (synthetic crossings): fragmentation 1.0 and zero ID
+switches down to 6 fps; below ~3 fps motion-only association is ambiguous by construction, so
+active tiles decode at ≥4 fps and R11's 2 fps floor applies to quiet tiles. Explicit lifecycle
 `born → active → occluded → exited|lost → dead`. Ambiguous association records
 `merge_candidates`, never silently merges. Fusion lifts tubes to world entities via homography
 foot points + tile-graph transit bounds + ReID cosine; overlapping cameras merge into one
