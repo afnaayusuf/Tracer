@@ -5,3 +5,4 @@ data/episodes/
 data/synthetic/
 data/keyframes/
 data/debug/
+data/*.db

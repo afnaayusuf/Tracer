@@ -53,3 +53,20 @@ def test_soft_cut_on_cast_churn_or_max_duration():
     assert should_soft_cut({"a", "b", "c"}, {"a", "b", "c"}, 31 * 60_000) is True
     assert should_soft_cut(set(), {"a"}, 1000) is False
     assert EpisodeStatus.soft_cut.value == "soft_cut"
+
+
+@pytest.mark.edge("E-STO-02")
+def test_writer_restart_resumes_without_duplicating_records(tmp_path, prov, t):
+    w = EpisodeWriter(tmp_path)
+    e = w.open("kitchen", ["c1"], t(1000), prov)
+    w.write_tick(e, Tick(camera_id="c1", tick_index=0, t_start=t(1000), t_end=t(1500), provenance=prov))
+    w.write_event(e, _event("ev_x", t))
+    # process crashes; a new writer replays the same episode
+    w2 = EpisodeWriter(tmp_path)
+    e2 = w2.open("kitchen", ["c1"], t(1000), prov)
+    assert e2 == e
+    assert w2.write_tick(e2, Tick(camera_id="c1", tick_index=0, t_start=t(1000), t_end=t(1500), provenance=prov)) is False
+    assert w2.write_event(e2, _event("ev_x", t)) is False
+    assert w2.write_tick(e2, Tick(camera_id="c1", tick_index=1, t_start=t(1500), t_end=t(2000), provenance=prov)) is True
+    kinds = [r.kind for r in EpisodeWriter.read(w2.path(e2))]
+    assert kinds == ["header", "tick", "event", "tick"]

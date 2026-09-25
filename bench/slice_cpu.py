@@ -71,6 +71,8 @@ def main(out_dir: str = "data/episodes") -> Path:
             print(f"t={t_ms:6d}  {e.type.value:24s} zone={e.zone_id} subjects={e.subject_tube_ids} objects={e.object_ids}")
     tubes = [tr.tube for tr in tracker._tracks.values()] + all_closed
     cast = [CastMember(tube_ids=[tb.tube_id], class_label=tb.class_label) for tb in tubes]
+    for tb in tubes:
+        writer.write_tube(ep, tb)
     writer.close(ep, CamTime(cam_utc_ms=44 * TICK_MS), EpisodeStatus.closed, cast)
     print(f"tubes: {[(tb.tube_id, tb.state.value) for tb in tubes]}")
     path = writer.path(ep)

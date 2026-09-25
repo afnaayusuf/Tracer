@@ -95,7 +95,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | ID | Case | Trigger | Handling | Status | Tests |
 |---|---|---|---|---|---|
 | E-STO-01 | Patch arrives after episode closed | Slow path finishes late. | Episode file is append-only; PatchRecord accepted after close. | implemented | test_episode.py::test_patch_after_close_is_appended |
-| E-STO-02 | Retries create duplicates | Writer crashes and replays. | Deterministic episode/event ids; per-record idempotency keys. | implemented | test_episode.py::test_writes_are_idempotent |
+| E-STO-02 | Retries create duplicates | Writer crashes and replays. | Deterministic episode/event ids; per-record idempotency keys. | implemented | test_episode.py::test_writes_are_idempotent<br>test_episode.py::test_writer_restart_resumes_without_duplicating_records<br>test_store_agent.py::test_loader_is_idempotent_and_derives_entities |
 | E-STO-03 | Retention expired for a clip | Clip requested for footage past retention. | clip tool checks availability; degrades to keyframes; answer states retention. | planned | — |
 | E-STO-04 | Schema version bump | New field added mid-deployment. | Provenance.schema_version on every record; readers tolerate unknown fields; migration script per bump. | implemented | test_schemas.py::test_provenance_required_and_unknown_fields_tolerated |
 | E-STO-05 | KB version drift | Transit bounds changed after an episode was compiled. | Provenance.kb_version on every record; replays pin the version. | implemented | test_schemas.py::test_provenance_required_and_unknown_fields_tolerated |

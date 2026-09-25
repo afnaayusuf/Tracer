@@ -12,6 +12,6 @@ checkpoints it to `data/bench/<ring>.jsonl` as it goes, so a killed Colab sessio
 | ring2_tubes.py | 2 | CPU | synthetic, MOT17 | MOTA/IDF1/IDSW/fragmentation (vi/eval/mot.py); `--tracker simple\|byte`, `--sample-every` simulates 2–5 fps decode |
 | ring3b_sheet.py | 3b | A100-40 | crops from ring2 | attribute accuracy, bleed rate (12 vs 16 cells), ms per sheet |
 | ring3a_events.py | 3a | CPU | MEVA subset | event precision/recall per type |
-| agent_replay.py | block 2 | A100-40 -> G4 | WILDTRACK episodes | both scenarios replay; tool calls, latency |
+| agent_replay.py | block 2 | CPU | episode files | loads episodes into SQLite/Postgres, renders the scene script, runs search/clip; LLM loop comes later |
 
 Colab: GPU runtime, `pip install rfdetr==1.7.0`, then run from the repo root (see colab/README.md).

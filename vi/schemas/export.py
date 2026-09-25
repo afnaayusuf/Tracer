@@ -5,10 +5,10 @@ import json
 from pathlib import Path
 
 from . import (Attributes, ContactSheetResult, EnrichmentPatch, Event, Fact, SceneCard, Tick, Tube)
-from .episode import EpisodeClose, EpisodeHeader, EventRecord, PatchRecord, TickRecord
+from .episode import EpisodeClose, EpisodeHeader, EventRecord, PatchRecord, TickRecord, TubeRecord
 
 MODELS = [Tick, Tube, Attributes, EnrichmentPatch, Event, SceneCard, Fact, ContactSheetResult,
-          EpisodeHeader, TickRecord, EventRecord, PatchRecord, EpisodeClose]
+          EpisodeHeader, TickRecord, EventRecord, PatchRecord, TubeRecord, EpisodeClose]
 
 
 def main(out_dir: str | Path = "schemas") -> list[Path]:

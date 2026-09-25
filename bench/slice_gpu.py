@@ -241,6 +241,8 @@ def main() -> None:
     tubes = [tr.tube for tr in tracker._tracks.values()] + closed_all
     cast = [CastMember(tube_ids=[t.tube_id], class_label=t.class_label, best_keyframe_ref=(t.keyframe_refs or [None])[0])
             for t in tubes]
+    for t in tubes:
+        writer.write_tube(ep, t)
     writer.close(ep, CamTime(cam_utc_ms=fr.pts_ms + tick_ms), EpisodeStatus.closed, cast)
     st = reader.stats
     row = {

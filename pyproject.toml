@@ -3,13 +3,14 @@ name = "vi-engine"
 version = "0.1.0"
 description = "Video intelligence engine: tube-centric perception (Block 1) + evidence-backed reasoning (Block 2)"
 requires-python = ">=3.10"
-dependencies = ["pydantic>=2.6", "numpy>=1.26", "pyyaml>=6"]
+dependencies = ["pydantic>=2.6", "numpy>=1.26", "pyyaml>=6", "sqlalchemy>=2.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 ingest = ["av>=13", "pillow>=10", "scipy>=1.11"]
 perception = ["rfdetr==1.7.0", "av>=13", "torch", "torchreid"]
-serving = ["vllm>=0.12", "psycopg[binary]>=3.2", "boto3"]
+serving = ["vllm>=0.12", "boto3"]
+store = ["psycopg[binary]>=3.2"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -2,8 +2,9 @@
 drifting gallery per entity (E-TUBE-08). Cross-camera fusion reuses the same gallery format.
 
 Rules:
-  * a newborn tube is compared against entities whose last tube went `lost` (never `exited`)
-    within max_gap_ms and whose last position is within max_jump_px;
+  * a newborn tube is compared against entities whose last tube closed within max_gap_ms and
+    whose last position is within max_jump_px; tubes that closed through an exit zone need a
+    stricter similarity (exit zones may be placeholders, and people step out and back);
   * cosine similarity >= sim_thr links it to that entity, else it starts a new one;
   * each entity keeps an EMA embedding plus up to `exemplars` raw embeddings; refreshes happen
     on confident active ticks so the gallery follows jacket-on/jacket-off;
@@ -28,14 +29,17 @@ class _Entity:
     exemplars: list[np.ndarray] = field(default_factory=list)
     last_box_center: tuple[float, float] = (0.0, 0.0)
     last_box_h: float = 1.0
-    lost_at_ms: int | None = None      # set when its current tube is lost; None while live/exited
+    lost_at_ms: int | None = None      # set when its current tube closed (lost or exited); None while live
+    closed_as_exit: bool = False
 
 
 class TubeLinker:
     def __init__(self, camera_id: str, sim_thr: float = 0.75, max_gap_ms: int = 30_000,
-                 max_jump_px: float = 400.0, ema_alpha: float = 0.3, exemplars: int = 5):
+                 max_jump_px: float = 400.0, ema_alpha: float = 0.3, exemplars: int = 5,
+                 exited_sim_thr: float = 0.85):
         self.camera_id = camera_id
         self.sim_thr = sim_thr
+        self.exited_sim_thr = exited_sim_thr   # placeholder exit zones misclassify lost as exited; allow with more evidence
         self.max_gap_ms = max_gap_ms
         self.max_jump_px = max_jump_px
         self.ema_alpha = ema_alpha
@@ -78,7 +82,8 @@ class TubeLinker:
         if cands:
             best = max(cands, key=lambda e: self._sim(e, emb))
             sim = self._sim(best, emb)
-            if sim >= self.sim_thr:
+            thr = self.exited_sim_thr if best.closed_as_exit else self.sim_thr
+            if sim >= thr:
                 prev = best.tube_ids[-1]
                 best.tube_ids.append(tube.tube_id)
                 best.lost_at_ms = None
@@ -111,7 +116,8 @@ class TubeLinker:
             return
         e = self._entities[eid]
         e.last_box_center, e.last_box_h = _center(tube), tube.box.height
-        e.lost_at_ms = t_ms if tube.state in (TubeState.lost, TubeState.occluded) else None
+        e.lost_at_ms = t_ms if tube.state in (TubeState.lost, TubeState.occluded, TubeState.exited) else None
+        e.closed_as_exit = tube.state == TubeState.exited
 
     def entity_of(self, tube_id: str) -> str | None:
         return self._tube_entity.get(tube_id)

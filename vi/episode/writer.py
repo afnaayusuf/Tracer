@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from vi.schemas import CamTime, EnrichmentPatch, Event, Provenance, Tick
+from vi.schemas import CamTime, EnrichmentPatch, Event, Provenance, Tick, Tube
 from vi.schemas.episode import (CastMember, EpisodeClose, EpisodeHeader, EpisodeStatus,
-                                EventRecord, PatchRecord, TickRecord, episode_record_adapter)
+                                EventRecord, PatchRecord, TickRecord, TubeRecord, episode_record_adapter)
 
 
 def episode_id_for(tile_id: str, t0_corrected_ms: int) -> str:
@@ -36,8 +36,25 @@ class EpisodeWriter:
             f.write(record.model_dump_json() + "\n")
         return True
 
+    def _resume(self, episode_id: str) -> None:
+        """A writer restarted after a crash must not append a second header or duplicate ticks:
+        rebuild the idempotency keys from what is already on disk."""
+        path = self.path(episode_id)
+        if not path.exists() or episode_id in self._seen:
+            return
+        seen = self._seen.setdefault(episode_id, set())
+        for rec in self.read(path):
+            k = rec.kind
+            if k == "header": seen.add("header")
+            elif k == "tick": seen.add(f"tick:{rec.tick.camera_id}:{rec.tick.tick_index}")
+            elif k == "event": seen.add(f"event:{rec.event.event_id}")
+            elif k == "patch": seen.add(f"patch:{rec.patch.patch_id}")
+            elif k == "tube": seen.add(f"tube:{rec.tube.tube_id}")
+            elif k == "close": seen.add("close"); self._closed.add(episode_id)
+
     def open(self, tile_id: str, camera_ids: list[str], t0: CamTime, provenance: Provenance) -> str:
         eid = episode_id_for(tile_id, t0.corrected_ms())
+        self._resume(eid)
         if eid in self._open or eid in self._closed:
             return eid
         hdr = EpisodeHeader(episode_id=eid, tile_id=tile_id, camera_ids=camera_ids, t0=t0, provenance=provenance)
@@ -54,6 +71,9 @@ class EpisodeWriter:
 
     def write_patch(self, episode_id: str, patch: EnrichmentPatch) -> bool:
         return self._append(episode_id, f"patch:{patch.patch_id}", PatchRecord(episode_id=episode_id, patch=patch))
+
+    def write_tube(self, episode_id: str, tube: Tube) -> bool:
+        return self._append(episode_id, f"tube:{tube.tube_id}", TubeRecord(episode_id=episode_id, tube=tube))
 
     def close(self, episode_id: str, t1: CamTime, status: EpisodeStatus, cast: list[CastMember]) -> bool:
         ok = self._append(episode_id, "close", EpisodeClose(episode_id=episode_id, t1=t1, status=status, cast=cast))

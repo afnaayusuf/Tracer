@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 from .common import CamTime, Provenance
 from .event import Event
 from .tick import Tick
-from .tube import EnrichmentPatch
+from .tube import EnrichmentPatch, Tube
 
 
 class EpisodeStatus(str, Enum):
@@ -55,6 +55,14 @@ class PatchRecord(BaseModel):
     patch: EnrichmentPatch
 
 
+class TubeRecord(BaseModel):
+    """Final state of a tube (entity id, keyframes, merge candidates), written at close time."""
+
+    kind: Literal["tube"] = "tube"
+    episode_id: str
+    tube: Tube
+
+
 class EpisodeClose(BaseModel):
     kind: Literal["close"] = "close"
     episode_id: str
@@ -64,7 +72,7 @@ class EpisodeClose(BaseModel):
 
 
 EpisodeRecord = Annotated[
-    Union[EpisodeHeader, TickRecord, EventRecord, PatchRecord, EpisodeClose],
+    Union[EpisodeHeader, TickRecord, EventRecord, PatchRecord, TubeRecord, EpisodeClose],
     Field(discriminator="kind"),
 ]
 episode_record_adapter: TypeAdapter = TypeAdapter(EpisodeRecord)

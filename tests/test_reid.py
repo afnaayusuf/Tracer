@@ -53,9 +53,13 @@ def test_relink_refuses_long_gaps_far_jumps_and_exited_tubes():
     lk2 = TubeLinker("c1", max_gap_ms=10_000, max_jump_px=200)
     t1 = tube("c1:0:1", 300); lk2.on_birth(t1, a, 0); t1.state = TubeState.lost; lk2.on_close(t1, 1000)
     assert lk2.on_birth(tube("c1:2000:2", 900, t=2000), a, 2000) is None                # 600 px jump
-    lk3 = TubeLinker("c1")
+    lk3 = TubeLinker("c1", sim_thr=0.75, exited_sim_thr=0.85)
     t1 = tube("c1:0:1", 300); lk3.on_birth(t1, a, 0); t1.state = TubeState.exited; lk3.on_close(t1, 1000)
-    assert lk3.on_birth(tube("c1:2000:2", 300, t=2000), a, 2000) is None                # left through an exit
+    b = unit(9); b -= (b @ a) * a; b /= np.linalg.norm(b)                     # orthogonal direction
+    weak = a * 0.8 + b * 0.6                                                  # cosine exactly 0.8: enough for lost, not for exited
+    assert 0.75 < float(a @ weak) < 0.85
+    assert lk3.on_birth(tube("c1:2000:2", 300, t=2000), weak, 2000) is None            # exited: needs stricter match
+    assert lk3.on_birth(tube("c1:2500:3", 300, t=2500), a, 2500) is not None           # identical look: relinked
 
 
 @pytest.mark.edge("E-TUBE-08")
