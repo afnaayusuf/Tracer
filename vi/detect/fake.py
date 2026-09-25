@@ -15,8 +15,10 @@ class BrightBlobDetector:
     resolution = 0
     optimized = False
 
-    def __init__(self, threshold: float = 0.1, luma: int = 200, min_side: int = 12, **_):
+    def __init__(self, threshold: float = 0.1, luma: int = 200, min_side: int = 12, batch_size: int = 8, **_):
         self.threshold = threshold
+        self.batch_size = batch_size
+        self.calls: list[int] = []
         self.luma = luma
         self.min_side = min_side
 
@@ -36,4 +38,7 @@ class BrightBlobDetector:
         return dets
 
     def detect_batch(self, crops: list[np.ndarray]) -> list[list[Detection]]:
+        if len(crops) > self.batch_size:          # same contract as the traced RF-DETR: fixed batch
+            raise ValueError(f"batch of {len(crops)} exceeds traced batch_size {self.batch_size}")
+        self.calls.append(len(crops))
         return [self.detect(c) for c in crops]

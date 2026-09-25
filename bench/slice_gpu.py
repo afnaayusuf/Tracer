@@ -58,7 +58,7 @@ def main() -> None:
     reader = VideoReader(a.camera, a.source, target_fps=a.fps, max_width=640, want_rgb=True)
     if a.model == "fake":
         from vi.detect.fake import BrightBlobDetector
-        det = BrightBlobDetector(threshold=a.threshold)          # CPU smoke path (tests, no GPU)
+        det = BrightBlobDetector(threshold=a.threshold, batch_size=a.batch)   # CPU smoke path (tests, no GPU)
     else:
         det = RFDETRDetector(size=a.model, threshold=a.threshold, batch_size=a.batch)
     gate = FrameDiffGate(a.camera)

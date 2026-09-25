@@ -151,7 +151,7 @@ class ByteTracker:
             tr.tube.state = TubeState.active if tr.confirmed else TubeState.born
         for i in ut:
             tr = tracks[i]
-            if not tr.confirmed and det_source != "heartbeat":
+            if not tr.confirmed:
                 del self._tracks[tr.tube.tube_id]          # unconfirmed and gone: never a tube
                 continue
             tr.kf.misses += 1

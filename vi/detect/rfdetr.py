@@ -60,13 +60,24 @@ class RFDETRDetector:
         return dets
 
     def detect(self, image_rgb: np.ndarray) -> list[Detection]:
-        return self._to_detections(self.model.predict(image_rgb, threshold=self.threshold,
-                                                      include_source_image=False))
+        return self.detect_batch([image_rgb])[0]
 
     def detect_batch(self, crops: list[np.ndarray]) -> list[list[Detection]]:
+        """The traced model only accepts exactly `batch_size` images, so every call is padded
+        to that size (repeating the last image) and the padding results are dropped. Callers
+        may pass 1..batch_size images; longer lists are processed in chunks."""
         if not crops:
             return []
-        results = self.model.predict(list(crops), threshold=self.threshold, include_source_image=False)
-        if not isinstance(results, list):
-            results = [results]
-        return [self._to_detections(r) for r in results]
+        out: list[list[Detection]] = []
+        for i in range(0, len(crops), self.batch_size):
+            chunk = list(crops[i:i + self.batch_size])
+            real = len(chunk)
+            if self.optimized:
+                while len(chunk) < self.batch_size:
+                    chunk.append(chunk[-1])
+            results = self.model.predict(chunk if len(chunk) > 1 else chunk[0], threshold=self.threshold,
+                                         include_source_image=False)
+            if not isinstance(results, list):
+                results = [results]
+            out += [self._to_detections(r) for r in results[:real]]
+        return out

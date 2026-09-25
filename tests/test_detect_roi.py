@@ -58,3 +58,27 @@ def test_merge_detections_keeps_higher_confidence_duplicate_and_unions_the_rest(
     b = Detection(box=Box(x1=300, y1=0, x2=340, y2=100), class_label="person", confidence=0.7)
     out = merge_detections([a], [a2, b])
     assert len(out) == 2 and out[0].confidence == 0.9 and out[1] is b
+
+
+def test_detector_pads_every_call_to_the_traced_batch():
+    """Regression for the session-06 crash: a full-frame heartbeat is one image, the traced
+    model wants exactly batch_size. Exercised on the RF-DETR wrapper via a stub model."""
+    from vi.detect.rfdetr import RFDETRDetector
+
+    class _Stub:
+        def __init__(self):
+            self.seen = []
+        def predict(self, images, threshold, include_source_image):
+            batch = images if isinstance(images, list) else [images]
+            self.seen.append(len(batch))
+            class R:  # minimal supervision-like result
+                xyxy = np.array([[0, 0, 10, 20]]); confidence = np.array([0.9]); class_id = np.array([1])
+                data = {"class_name": np.array(["person"])}
+            return [R() for _ in batch] if isinstance(images, list) else R()
+
+    det = RFDETRDetector.__new__(RFDETRDetector)
+    det.model, det.optimized, det.batch_size, det.threshold, det.keep, det.size = _Stub(), True, 8, 0.5, {"person"}, "nano"
+    single = det.detect(np.zeros((720, 1280, 3), np.uint8))
+    assert len(single) == 1 and det.model.seen == [8]                 # padded to the traced batch
+    eleven = det.detect_batch([np.zeros((50, 50, 3), np.uint8)] * 11)
+    assert len(eleven) == 11 and det.model.seen[1:] == [8, 8]         # 8 + (3 padded to 8), 11 results back
