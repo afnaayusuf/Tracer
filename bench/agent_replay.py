@@ -49,7 +49,8 @@ def main() -> None:
         for q in a.ask:
             res = ask(engine, q, ep, backend)
             answers.append(res)
-            calls = [f"{t['tool']}({', '.join(f'{k}={v}' for k, v in t['args'].items())}) -> {t['results']}" for t in res["trace"] if "tool" in t]
+            calls = [f"{t['tool']}({', '.join(f'{k}={v}' for k, v in t['args'].items())}) -> "
+                     + (f"ERROR {t['error'][:80]}" if t.get('error') else str(t['results'])) for t in res["trace"] if "tool" in t]
             print(f"\nQ: {q}\n   tools: " + " | ".join(calls))
             f = res["final"]
             if f["action"] == "answer":

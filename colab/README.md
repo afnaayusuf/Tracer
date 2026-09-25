@@ -34,3 +34,15 @@ wherever you open Colab.
 
 Rules: `%cd` not `!cd`; data lives in R2 (later) not in the runtime; a killed runtime loses
 nothing that was committed.
+
+## Reasoning model in Colab
+
+vLLM must not share the runtime's torch (Colab ships a CUDA 13 torch; vLLM wheels bring a
+CUDA 12.8 torch and torchaudio then refuses to import). It lives in its own venv:
+
+```
+%%bash
+bash colab/vllm_venv.sh start Qwen/Qwen3.5-4B      # installs once per runtime, serves on :8000
+python bench/agent_replay.py --db "$DB_URL" data/episodes/*.jsonl --backend openai --ask "..."
+bash colab/vllm_venv.sh stop
+```

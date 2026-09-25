@@ -75,3 +75,29 @@ def test_agent_loop_reports_no_results_honestly(episode_path):
     ep = search_events(engine)[0]["episode_id"]
     out = ask(engine, "Did anybody fall? (nobody did)", ep, FakeBackend())
     assert out["final"]["action"] == "answer" and "No matching" in out["final"]["text"] and out["final"]["citations"] == []
+
+
+@pytest.mark.edge("E-ING-06")
+def test_every_millisecond_column_is_64_bit_on_postgres():
+    """UTC ms (~1.7e12) overflow PostgreSQL INTEGER; SQLite would never notice."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateTable
+    from vi.store.db import metadata
+    for table in metadata.tables.values():
+        ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
+        for col in table.columns:
+            if col.name.endswith("_ms"):
+                assert f"{col.name} BIGINT" in ddl, f"{table.name}.{col.name} must be BIGINT"
+
+
+def test_store_round_trips_a_utc_millisecond_timestamp():
+    import time
+    from vi.store import connect
+    from vi.store.db import insert_ignore, scripts
+    from sqlalchemy import select
+    engine = connect()
+    now = int(time.time() * 1000)
+    with engine.begin() as conn:
+        insert_ignore(conn, scripts, [dict(episode_id="ep_x", text="t", rendered_at_ms=now)])
+    with engine.connect() as conn:
+        assert conn.execute(select(scripts.c.rendered_at_ms)).scalar() == now
