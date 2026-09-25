@@ -1,6 +1,6 @@
 # Edge-case registry
 
-Generated from `edge_cases.yaml` by `make edge-doc`. 72 cases, 30 implemented and tested.
+Generated from `edge_cases.yaml` by `make edge-doc`. 72 cases, 31 implemented and tested.
 
 Status: **implemented** = code path exists and a test marked `@pytest.mark.edge("ID")` exercises it; **planned** = month-1 scope; **deferred** = tracked, not month 1.
 
@@ -34,7 +34,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | ID | Case | Trigger | Handling | Status | Tests |
 |---|---|---|---|---|---|
 | E-DET-01 | Tiny objects below detector floor | Keys, phone, small tools at room-camera resolution. | Not detected as tubes; tracked via carried_item attribute and asset-home occupancy; inspect tool for on-demand native-res count/find; resolution ceiling stated in answers. | planned | — |
-| E-DET-02 | Truncation at frame edge | Half a person at the border. | Foot point marked fallback_bbox_bottom with wide uncertainty; keyframe scoring penalises truncated boxes. | planned | — |
+| E-DET-02 | Truncation at frame edge | Half a person at the border. | remap_detections flags boxes within 2 px of the frame border as truncated; Ring 2 then uses fallback_bbox_bottom with wide uncertainty and keyframe scoring penalises them. | implemented | test_detect_roi.py::test_remap_shifts_boxes_and_flags_frame_border_truncation |
 | E-DET-03 | Class confusion | Child vs small adult; dog vs bag; mannequin vs person. | Class is an attribute with confidence; enrichment can override; agent never asserts class below threshold. | planned | — |
 | E-DET-04 | Ghost detections in reflections | Mirror/glass shows a duplicate person. | Tubes inside reflective_surfaces are reflection_suspect; fusion never creates an entity from a suspect tube alone. | planned | — |
 | E-DET-05 | People on screens, posters, photos | TV shows a face; framed photo detected as person. | media_zones from scene card; detections fully inside a media zone with no tube motion are dropped. | planned | — |

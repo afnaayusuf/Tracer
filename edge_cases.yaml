@@ -108,8 +108,8 @@ cases:
   ring: ring1
   title: Truncation at frame edge
   trigger: Half a person at the border.
-  handling: Foot point marked fallback_bbox_bottom with wide uncertainty; keyframe scoring penalises truncated boxes.
-  status: planned
+  handling: remap_detections flags boxes within 2 px of the frame border as truncated; Ring 2 then uses fallback_bbox_bottom with wide uncertainty and keyframe scoring penalises them.
+  status: implemented
 - id: E-DET-03
   ring: ring1
   title: Class confusion

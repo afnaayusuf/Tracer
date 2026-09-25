@@ -13,6 +13,7 @@ class Detection(BaseModel):
     class_label: str
     confidence: float = Field(ge=0.0, le=1.0)
     embedding: list[float] | None = None   # R14: ReID alongside the box
+    truncated: bool = False                # E-DET-02: box touches the frame border
 
 
 class Detector(Protocol):

@@ -72,6 +72,7 @@ class Frame:
     stride: int
     codec: str
     size_changed: bool = False
+    rgb: np.ndarray | None = None   # uint8 HxWx3 at native resolution, only when want_rgb=True
 
 
 @dataclass
@@ -107,8 +108,9 @@ class VideoReader:
     color. `stride` downsamples by integer slicing (cheap) so the gate runs on ~320–640 px."""
 
     def __init__(self, camera_id: str, source: str, target_fps: float | None = None,
-                 max_width: int | None = 640, rtsp_tcp: bool = True):
+                 max_width: int | None = 640, rtsp_tcp: bool = True, want_rgb: bool = False):
         self.camera_id = camera_id
+        self.want_rgb = want_rgb          # Ring 1 needs native-res RGB; the gate never does
         self.source = source
         self.target_fps = target_fps
         self.max_width = max_width
@@ -147,12 +149,13 @@ class VideoReader:
                     self.stats.native_size = (frame.width, frame.height)
                 size_changed = size_guard.check(frame.width, frame.height)
                 gray = frame.to_ndarray(format="gray")
+                rgb = frame.to_ndarray(format="rgb24") if self.want_rgb else None
                 stride = max(1, -(-frame.width // self.max_width)) if self.max_width else 1
                 if stride > 1:
                     gray = gray[::stride, ::stride]
                 self.stats.decode_ms_total += (time.perf_counter() - t0) * 1000
                 self.stats.frames_emitted += 1
-                yield Frame(camera_id=self.camera_id, pts_ms=pts_ms, wall_ms=wall_ms, gray=gray,
+                yield Frame(camera_id=self.camera_id, pts_ms=pts_ms, wall_ms=wall_ms, gray=gray, rgb=rgb,
                             is_keyframe=bool(frame.key_frame), width=frame.width, height=frame.height,
                             stride=stride, codec=codec, size_changed=size_changed)
             self.stats.duplicates = pts_filter.duplicates

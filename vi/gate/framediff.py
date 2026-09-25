@@ -44,6 +44,17 @@ class FrameDiffGate:
 
     @staticmethod
     def _components(mask: np.ndarray) -> list[list[tuple[int, int]]]:
+        try:  # vectorised path (scipy is present on Colab); the pure-python BFS below is the fallback
+            from scipy import ndimage
+            labels, n = ndimage.label(mask)
+            if n == 0:
+                return []
+            comps: list[list[tuple[int, int]]] = [[] for _ in range(n)]
+            for i, j in zip(*np.nonzero(labels)):
+                comps[labels[i, j] - 1].append((int(i), int(j)))
+            return comps
+        except ImportError:
+            pass
         seen = np.zeros_like(mask, dtype=bool)
         comps: list[list[tuple[int, int]]] = []
         hb, wb = mask.shape
