@@ -44,6 +44,13 @@ intra-only streams: frame differencing at 1 fps behind the same interface (`vi/g
 Slice implementation: `FrameDiffGate`. Production: `MVGate` (week 3). **MEASURE:** gate FN rate,
 ms per GOP per stream.
 
+**Measured decision (sessions 06–08, one camera, L4):** full-frame detection every tick costs the
+same as ROI-only (~27 ms per call; per-call overhead dominates at batch size 1–8) and tracks best
+(15 tubes / 10 concurrent, life 9.0 s, 0 rebirths, vs 17/7, 5.5 s for ROI-only). The single-camera
+slice therefore detects on the full frame every tick. ROI gating and heartbeat hybrids remain the
+multi-camera cost lever and are re-measured when the cross-camera batching bench exists; the
+hybrid duplicate-tube defect is tracked under E-DET-10.
+
 **Ring 1 — selective decode + detect.** Decode only gated cameras at 2–5 fps sampled on NVDEC
 (PyNvVideoCodec, MIT). Pack motion ROIs from many cameras into one batch; one detector forward
 per batch; TensorRT FP16 on server, ONNX Runtime on edge. Detector: RF-DETR 1.7.0 Nano (edge) /

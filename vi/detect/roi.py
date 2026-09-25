@@ -107,14 +107,16 @@ def dedupe_detections(dets: list[Detection], iou_thr: float = 0.5, ios_thr: floa
 
 
 def pad_batch(crops: list[np.ndarray], batch_size: int) -> tuple[list[np.ndarray], int]:
-    """A traced model runs at one fixed batch size; pad with the last crop and report how
+    """A traced model runs at one fixed batch size; pad with the *smallest* crop (preprocessing
+    cost scales with pixels, and the full-frame heartbeat crop is usually last) and report how
     many entries are real so the caller drops the padding."""
     if not crops:
         return [], 0
     real = len(crops)
     padded = list(crops[:batch_size])
+    filler = min(padded, key=lambda c: c.shape[0] * c.shape[1])
     while len(padded) < batch_size:
-        padded.append(padded[-1])
+        padded.append(filler)
     return padded, min(real, batch_size)
 
 

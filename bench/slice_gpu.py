@@ -43,8 +43,9 @@ def main() -> None:
                     help="detector floor; ByteTracker re-attaches 0.1-0.5 detections and births only >=0.5")
     ap.add_argument("--tracker", choices=sorted(TRACKERS), default="byte")
     ap.add_argument("--warmup", type=int, default=3, help="frames excluded from timing (JIT profiling runs)")
-    ap.add_argument("--detect", choices=["roi", "frame", "hybrid"], default="hybrid",
-                    help="roi: motion ROIs only; frame: full frame every tick; hybrid: ROIs + full-frame heartbeat")
+    ap.add_argument("--detect", choices=["roi", "frame", "hybrid"], default="frame",
+                    help="frame (default, measured best at one camera): full frame every tick; roi: motion ROIs only; "
+                         "hybrid: ROIs + full-frame heartbeat (multi-camera cost lever, under investigation)")
     ap.add_argument("--heartbeat-ms", type=int, default=1000, help="hybrid: full-frame detection period on active tiles")
     ap.add_argument("--quiet-heartbeat-ms", type=int, default=10000)
     ap.add_argument("--debug-frames", type=int, default=0, help="save N annotated frames to data/debug/<episode>/")
@@ -86,6 +87,8 @@ def main() -> None:
     confirmed_ids: set[str] = set()
     origin_of: dict[str, str] = {}
     debug_every = max(1, int(a.fps * 1.5)) if a.debug_frames else 0     # one frame every ~1.5 s until N saved
+    duplicate_pairs: list[dict] = []                # two live person tubes on one body: the hybrid bug, caught in the act
+    dup_frames: list[str] = []
     debug_paths: list[str] = []
     person_dets: list[int] = []
     concurrent_persons: list[int] = []
@@ -150,6 +153,26 @@ def main() -> None:
             if t.state.value == "active" and t.tube_id not in confirmed_ids:
                 confirmed_ids.add(t.tube_id)
                 confirmed_by_origin[origin_of.get(t.tube_id, "unknown")] += 1
+        persons = [t for t in live if t.class_label == "person" and t.state.value in ("active", "born")]
+        for i in range(len(persons)):
+            for j in range(i + 1, len(persons)):
+                ti, tj = persons[i], persons[j]
+                iou = ti.box.iou(tj.box)
+                if iou >= 0.5 and len(duplicate_pairs) < 12:
+                    dets_here = [{"origin": d.origin, "conf": round(d.confidence, 2), "box": [round(v) for v in (d.box.x1, d.box.y1, d.box.x2, d.box.y2)],
+                                  "iou_i": round(d.box.iou(ti.box), 2), "iou_j": round(d.box.iou(tj.box), 2)}
+                                 for d in dets if d.class_label == "person" and (d.box.iou(ti.box) > 0.1 or d.box.iou(tj.box) > 0.1)]
+                    duplicate_pairs.append({"t_ms": fr.pts_ms, "hb": det_source == "heartbeat", "iou": round(iou, 2),
+                                            "a": {"id": ti.tube_id, "origin": origin_of.get(ti.tube_id), "state": ti.state.value,
+                                                  "box": [round(v) for v in (ti.box.x1, ti.box.y1, ti.box.x2, ti.box.y2)]},
+                                            "b": {"id": tj.tube_id, "origin": origin_of.get(tj.tube_id), "state": tj.state.value,
+                                                  "box": [round(v) for v in (tj.box.x1, tj.box.y1, tj.box.x2, tj.box.y2)]},
+                                            "dets_on_tick": dets_here})
+                    if len(dup_frames) < 4:
+                        p = annotate(fr.rgb, rois, dets, live, f"DUPLICATE t={fr.pts_ms}ms {a.detect} hb={'Y' if det_source == 'heartbeat' else 'n'}",
+                                     Path(a.out).parent / "debug" / ep / f"dup_{frames:04d}.jpg")
+                        if p:
+                            dup_frames.append(str(p))
         for t in closed:
             if t.class_label == "person":
                 recent_dead.append((fr.pts_ms, (t.box.x1 + t.box.x2) / 2, (t.box.y1 + t.box.y2) / 2, t.box.height))
@@ -200,7 +223,7 @@ def main() -> None:
         "person_visibility_duty": round(state_ticks["active"] / max(1, state_ticks["active"] + state_ticks["occluded"]), 3),
         "fragmentation_est": round(sum(1 for t in tubes if t.class_label == "person") / max(1.0, float(np.mean(person_dets))), 2) if person_dets else None,
         "births_by_origin": dict(births_by_origin), "confirmed_by_origin": dict(confirmed_by_origin),
-        "rebirths": rebirths,
+        "rebirths": rebirths, "duplicate_pairs": duplicate_pairs, "duplicate_frames": dup_frames,
         "debug_frames": debug_paths,
         "tubes_per_concurrent": round(sum(1 for t in tubes if t.class_label == "person") / max(1, max(concurrent_persons) if concurrent_persons else 1), 2),
         "mean_person_tube_life_s": round(float(np.mean([(t.last_seen.corrected_ms() - t.born.corrected_ms()) / 1000

@@ -43,7 +43,10 @@ def test_remap_shifts_boxes_and_flags_frame_border_truncation():
 def test_pad_batch_fills_with_last_crop_and_reports_real_count():
     crops = [np.zeros((10, 10, 3), np.uint8), np.ones((10, 10, 3), np.uint8)]
     padded, real = pad_batch(crops, 4)
-    assert len(padded) == 4 and real == 2 and padded[3] is crops[1]
+    assert len(padded) == 4 and real == 2 and padded[3] is crops[0]     # smallest crop is the filler
+    big = np.zeros((720, 1280, 3), np.uint8)
+    padded, _ = pad_batch([np.zeros((50, 50, 3), np.uint8), big], 8)
+    assert all(p.shape == (50, 50, 3) for p in padded[2:])              # never pad with the full frame
     assert pad_batch([], 4) == ([], 0)
     frame = np.arange(20 * 30 * 3, dtype=np.uint8).reshape(20, 30, 3)
     from vi.detect.roi import ROI
