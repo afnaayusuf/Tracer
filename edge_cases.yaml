@@ -389,8 +389,8 @@ cases:
   ring: agent
   title: No results
   trigger: Nothing matches the window.
-  handling: Say so; propose widening; never fabricate.
-  status: planned
+  handling: Empty tool results are shown to the model as such; the answer must say nothing matched and suggest widening; citations empty.
+  status: implemented
 - id: E-AGT-03
   ring: agent
   title: Unknown named entity
@@ -413,8 +413,8 @@ cases:
   ring: agent
   title: Unverified claim
   trigger: Attribute from a low-confidence patch.
-  handling: verify() before asserting; every claim cites record ids and timestamps.
-  status: planned
+  handling: The agent loop keeps the set of ids that appeared in tool results; an answer whose citations are not in that set is sent back once for revision, then returned with cited=false. verify() lands with the writer VLM.
+  status: implemented
 - id: E-AGT-07
   ring: agent
   title: Broken custody chain

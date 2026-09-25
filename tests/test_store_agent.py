@@ -50,3 +50,28 @@ def test_scene_script_is_deterministic_and_cites(episode_path):
     assert "pickup" in s1 and "object bike_keys" in s1 and "[ev_" in s1
     custody_line = next(l for l in s1.splitlines() if "pickup" in l)
     assert "anon:cam1:" in custody_line          # subject cited by entity + tube
+
+
+@pytest.mark.edge("E-AGT-06")
+def test_agent_loop_cites_only_ids_it_was_shown(episode_path):
+    from vi.agent import FakeBackend, ask
+    engine = connect()
+    load_episode_file(engine, episode_path)
+    ep = search_events(engine)[0]["episode_id"]
+    out = ask(engine, "Who took the bike keys?", ep, FakeBackend())
+    assert out["final"]["action"] == "answer" and out["final"]["cited"]
+    assert any(c.startswith("ev_") for c in out["final"]["citations"])
+    assert [t["tool"] for t in out["trace"] if "tool" in t][:2] == ["get_script", "search_events"]
+    bad = ask(engine, "Who took the bike keys?", ep, FakeBackend(bogus_citation=True))
+    revise = next(t for t in bad["trace"] if "revise" in t)     # asked to revise once, naming the bad id
+    assert revise["invalid"] == ["ev_deadbeefdeadbeef"] and bad["final"]["cited"] is False
+
+
+@pytest.mark.edge("E-AGT-02")
+def test_agent_loop_reports_no_results_honestly(episode_path):
+    from vi.agent import FakeBackend, ask
+    engine = connect()
+    load_episode_file(engine, episode_path)
+    ep = search_events(engine)[0]["episode_id"]
+    out = ask(engine, "Did anybody fall? (nobody did)", ep, FakeBackend())
+    assert out["final"]["action"] == "answer" and "No matching" in out["final"]["text"] and out["final"]["citations"] == []

@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from vi.agent import clip, get_script, search_entities, search_events, search_tubes
+from vi.agent import FakeBackend, OpenAIBackend, ask, clip, get_script, search_entities, search_events, search_tubes
 from vi.store import connect, load_episode_file
 
 
@@ -20,6 +20,10 @@ def main() -> None:
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--db", default="sqlite+pysqlite:///data/vi.db")
     ap.add_argument("--script-lines", type=int, default=40)
+    ap.add_argument("--ask", action="append", default=[], help="question(s) to run through the agent loop")
+    ap.add_argument("--backend", choices=["fake", "openai"], default="fake")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
+    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     a = ap.parse_args()
     engine = connect(a.db)
     loaded = [load_episode_file(engine, p) for p in a.paths]
@@ -39,10 +43,25 @@ def main() -> None:
            "script_chars": len(script), "script_lines": len(script.splitlines()),
            "clip_first_entity": {"tubes": len(evidence.get("tube_ids", [])), "keyframes": len(evidence.get("keyframe_refs", []))},
            "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    answers = []
+    if a.ask:
+        backend = FakeBackend() if a.backend == "fake" else OpenAIBackend(base_url=a.base_url, model=a.model)
+        for q in a.ask:
+            res = ask(engine, q, ep, backend)
+            answers.append(res)
+            calls = [f"{t['tool']}({', '.join(f'{k}={v}' for k, v in t['args'].items())}) -> {t['results']}" for t in res["trace"] if "tool" in t]
+            print(f"\nQ: {q}\n   tools: " + " | ".join(calls))
+            f = res["final"]
+            if f["action"] == "answer":
+                print(f"   A ({f.get('confidence', 0):.2f}{'' if f['cited'] else ', UNCITED'}): {f['text']}\n   cites: {', '.join(f['citations']) or '—'}")
+            else:
+                print(f"   clarify: {f['question']}")
+        row["answers"] = [{"q": r["question"], "steps": r["steps"], "cited": r["final"].get("cited"),
+                           "action": r["final"]["action"], "backend": r["backend"]} for r in answers]
     out = Path("data/bench"); out.mkdir(parents=True, exist_ok=True)
     with (out / "agent.jsonl").open("a") as f:
         f.write(json.dumps(row) + "\n")
-    print(json.dumps(row, indent=2))
+    print(json.dumps({k: v for k, v in row.items() if k != "answers"}, indent=2))
 
 
 if __name__ == "__main__":

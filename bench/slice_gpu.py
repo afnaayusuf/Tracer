@@ -98,6 +98,7 @@ def main() -> None:
     linker = TubeLinker(a.camera, sim_thr=a.reid_sim) if embedder else None
     embed_ms: list[float] = []
     last_embed_tick: dict[str, int] = {}
+    pending_link: dict[str, np.ndarray] = {}
     relink_events = 0
     debug_paths: list[str] = []
     person_dets: list[int] = []
@@ -164,24 +165,35 @@ def main() -> None:
                 confirmed_ids.add(t.tube_id)
                 confirmed_by_origin[origin_of.get(t.tube_id, "unknown")] += 1
         if linker is not None:
+            # embed at first sight, but only *link* once the tracker has confirmed the tube (state
+            # active): an unconfirmed tube can still be deleted next tick, and a link to a tube
+            # that never existed corrupts the cast (seen in session 12).
             due_birth = [t for t in live if t.class_label == "person" and t.tube_id not in last_embed_tick]
             due_refresh = [t for t in live if t.class_label == "person" and t.state.value == "active"
-                           and t.tube_id in last_embed_tick and frames - last_embed_tick[t.tube_id] >= a.reid_every_ticks]
+                           and t.tube_id in last_embed_tick and t.tube_id not in pending_link
+                           and frames - last_embed_tick[t.tube_id] >= a.reid_every_ticks]
             todo = due_birth + due_refresh
             if todo:
                 t0 = time.perf_counter()
                 embs = embedder.embed([crop_for_embedding(fr.rgb, t.box) for t in todo])
                 embed_ms.append((time.perf_counter() - t0) * 1000)
+                birth_ids = {x.tube_id for x in due_birth}
                 for t, e in zip(todo, embs):
                     last_embed_tick[t.tube_id] = frames
-                    if t.tube_id in {x.tube_id for x in due_birth}:
-                        ev = linker.on_birth(t, e, fr.pts_ms)
-                        if ev is not None:
-                            events.append(ev)
-                            relink_events += 1
-                            print(f"t={fr.pts_ms:7d}  relink                 {ev.subject_tube_ids[0]} -> {ev.subject_tube_ids[1]} sim={ev.payload['similarity']}")
+                    if t.tube_id in birth_ids:
+                        pending_link[t.tube_id] = e
                     else:
                         linker.on_refresh(t, e)
+            live_ids = {t.tube_id for t in live}
+            for t in live:
+                if t.tube_id in pending_link and t.state.value == "active":
+                    ev = linker.on_birth(t, pending_link.pop(t.tube_id), fr.pts_ms)
+                    if ev is not None:
+                        events.append(ev)
+                        relink_events += 1
+                        print(f"t={fr.pts_ms:7d}  relink                 {ev.subject_tube_ids[0]} -> {ev.subject_tube_ids[1]} sim={ev.payload['similarity']}")
+            for tid in [k for k in pending_link if k not in live_ids]:
+                pending_link.pop(tid)                       # deleted while unconfirmed: never linked
             for t in live:
                 if t.class_label == "person":
                     t.entity_id = linker.entity_of(t.tube_id)

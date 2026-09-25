@@ -1,6 +1,6 @@
 # Edge-case registry
 
-Generated from `edge_cases.yaml` by `make edge-doc`. 78 cases, 40 implemented and tested.
+Generated from `edge_cases.yaml` by `make edge-doc`. 78 cases, 42 implemented and tested.
 
 Status: **implemented** = code path exists and a test marked `@pytest.mark.edge("ID")` exercises it; **planned** = month-1 scope; **deferred** = tracked, not month 1.
 
@@ -105,11 +105,11 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | ID | Case | Trigger | Handling | Status | Tests |
 |---|---|---|---|---|---|
 | E-AGT-01 | Ambiguous anchor | "After Jay went out" matches two exits. | One clarifying question; never a silent pick. | planned | — |
-| E-AGT-02 | No results | Nothing matches the window. | Say so; propose widening; never fabricate. | planned | — |
+| E-AGT-02 | No results | Nothing matches the window. | Empty tool results are shown to the model as such; the answer must say nothing matched and suggest widening; citations empty. | implemented | test_store_agent.py::test_agent_loop_reports_no_results_honestly |
 | E-AGT-03 | Unknown named entity | "Jay" not in gallery. | Ask who Jay is; offer naming form. | planned | — |
 | E-AGT-04 | Fuzzy time expressions | "yesterday afternoon", "after lunch". | Resolve to explicit local window; echo it in the answer. | planned | — |
 | E-AGT-05 | Color question on IR footage | "what color was his shirt" at night. | State IR mode; give tone; never a color. | planned | — |
-| E-AGT-06 | Unverified claim | Attribute from a low-confidence patch. | verify() before asserting; every claim cites record ids and timestamps. | planned | — |
+| E-AGT-06 | Unverified claim | Attribute from a low-confidence patch. | The agent loop keeps the set of ids that appeared in tool results; an answer whose citations are not in that set is sent back once for revision, then returned with cited=false. verify() lands with the writer VLM. | implemented | test_store_agent.py::test_agent_loop_cites_only_ids_it_was_shown |
 | E-AGT-07 | Broken custody chain | carried_item missed; drop never fired. | Graceful degrade: last known custody + offer clip. | planned | — |
 | E-AGT-08 | Duplicates from overlapping cameras in the answer | Same person listed twice. | Answer over entities, not tubes. | planned | — |
 
