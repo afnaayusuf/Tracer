@@ -158,6 +158,12 @@ cases:
   trigger: A person straddles two adjacent ROI crops, or is seen by both a crop and the full-frame heartbeat with boxes of different extent; each becomes a tube.
   handling: Every tick's detections pass through dedupe_detections (class-wise, IoU>=0.5 or intersection-over-smaller>=0.6); complete boxes beat crop-truncated ones. Measured in session 06 as max_concurrent 13 on a 9-person frame.
   status: implemented
+- id: E-DET-11
+  ring: ring1
+  title: Zoomed crops promote background specks and boxes into confident detections
+  trigger: In an ROI crop a 20-px figure at the far dock reads as person 0.6 and cardboard as suitcase 0.5; each becomes a tube (13 suitcase tubes in session 05).
+  handling: 'Birth gates in the tracker: minimum box height (32 px) and class-specific confidence (person 0.5, other classes 0.65); re-attachment thresholds unchanged.'
+  status: implemented
 # ---------------- ring 2 tubes / fusion ----------------
 - id: E-TUBE-01
   ring: ring2
@@ -224,6 +230,12 @@ cases:
   title: Fragmentation at sampled frame rate
   trigger: Decode at 2 fps means a walking person moves half a box width between ticks; IoU association breaks the tube.
   handling: ByteTracker with dt-aware Kalman, buffered IoU and a first-tick centre gate keeps fragmentation at 1.0 down to ~4-6 fps (synthetic); below ~3 fps motion-only association is ambiguous by construction, so active tiles decode at >=4 fps and 2 fps is for quiet tiles only.
+  status: implemented
+- id: E-TUBE-14
+  ring: ring2
+  title: Predicted box balloons during long occlusion
+  trigger: Kalman aspect/height velocities keep integrating while a track is unseen; the predicted box grows over the scene and re-attaches to junk (seen in the session-08 debug frames).
+  handling: KalmanBoxFilter clamps predicted height and aspect to 0.6–1.6× the last measurement and zeroes the size velocities when the clamp engages.
   status: implemented
 - id: E-TUBE-12
   ring: ring2

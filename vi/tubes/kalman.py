@@ -35,6 +35,9 @@ class KalmanBoxFilter:
         self.age_s = 0.0
         self.hits = 1
         self.misses = 0
+        self.last_meas_h = z[3]
+        self.last_meas_a = z[2]
+        self.size_band = (0.6, 1.6)   # E-TUBE-14: predicted h and aspect may not drift outside this band
 
     def predict(self, dt_s: float) -> Box:
         dt = max(dt_s, 1e-3)
@@ -49,6 +52,16 @@ class KalmanBoxFilter:
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
         self.age_s += dt
+        # E-TUBE-14: a box predicted through a long occlusion must not balloon or collapse; a
+        # person does not change size while unseen. Clamp size to a band around the last
+        # measurement and zero the size velocities once the clamp engages.
+        lo, hi = self.size_band
+        h_min, h_max = self.last_meas_h * lo, self.last_meas_h * hi
+        a_min, a_max = self.last_meas_a * lo, self.last_meas_a * hi
+        if not (h_min <= self.x[3] <= h_max):
+            self.x[3] = float(np.clip(self.x[3], h_min, h_max)); self.x[7] = 0.0
+        if not (a_min <= self.x[2] <= a_max):
+            self.x[2] = float(np.clip(self.x[2], a_min, a_max)); self.x[6] = 0.0
         return z_to_box(self.x[:4])
 
     def update(self, box: Box) -> Box:
@@ -63,6 +76,8 @@ class KalmanBoxFilter:
         self.P = (np.eye(8) - K @ H) @ self.P
         self.hits += 1
         self.misses = 0
+        self.last_meas_h = z[3]
+        self.last_meas_a = z[2]
         return z_to_box(self.x[:4])
 
     @property

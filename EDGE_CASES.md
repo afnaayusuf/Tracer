@@ -1,6 +1,6 @@
 # Edge-case registry
 
-Generated from `edge_cases.yaml` by `make edge-doc`. 76 cases, 36 implemented and tested.
+Generated from `edge_cases.yaml` by `make edge-doc`. 78 cases, 38 implemented and tested.
 
 Status: **implemented** = code path exists and a test marked `@pytest.mark.edge("ID")` exercises it; **planned** = month-1 scope; **deferred** = tracked, not month 1.
 
@@ -43,6 +43,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | E-DET-08 | IR appearance shift lowers recall | Night mode. | Measured on night eval set before any enhancer; enhancer only if gap is real and license clear. | planned | — |
 | E-DET-09 | Static furniture and fixtures become tubes | Detector emits dining table, tv, chair as objects; tracker births permanent tubes for them. | Only TUBE_CLASSES (people, animals, vehicles, carried bags) become tubes; furniture is a scene-card asset owned by zones and heartbeats. | implemented | test_eval_mot.py::test_default_zones_and_tube_classes |
 | E-DET-10 | One object, several detections | A person straddles two adjacent ROI crops, or is seen by both a crop and the full-frame heartbeat with boxes of different extent; each becomes a tube. | Every tick's detections pass through dedupe_detections (class-wise, IoU>=0.5 or intersection-over-smaller>=0.6); complete boxes beat crop-truncated ones. Measured in session 06 as max_concurrent 13 on a 9-person frame. | implemented | test_detect_roi.py::test_dedupe_prefers_complete_box_over_crop_truncated_partials |
+| E-DET-11 | Zoomed crops promote background specks and boxes into confident detections | In an ROI crop a 20-px figure at the far dock reads as person 0.6 and cardboard as suitcase 0.5; each becomes a tube (13 suitcase tubes in session 05). | Birth gates in the tracker: minimum box height (32 px) and class-specific confidence (person 0.5, other classes 0.65); re-attachment thresholds unchanged. | implemented | test_tubes.py::test_birth_gates_reject_tiny_bodies_and_low_confidence_non_persons |
 
 ## Ring 2 · tubes and fusion
 
@@ -59,6 +60,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | E-TUBE-09 | Carried object is not its own tube | Bag on shoulder; keys in hand. | carried_item attribute on the person tube; object tube only when placed and stationary. | planned | — |
 | E-TUBE-10 | Pets, strollers, wheelchairs | Non-person moving classes; child inside stroller. | Class-specific lifecycle; stroller+child handled as one tube with carried_item=child hint. | deferred | — |
 | E-TUBE-13 | Fragmentation at sampled frame rate | Decode at 2 fps means a walking person moves half a box width between ticks; IoU association breaks the tube. | ByteTracker with dt-aware Kalman, buffered IoU and a first-tick centre gate keeps fragmentation at 1.0 down to ~4-6 fps (synthetic); below ~3 fps motion-only association is ambiguous by construction, so active tiles decode at >=4 fps and 2 fps is for quiet tiles only. | implemented | test_tubes.py::test_bytetracker_survives_sampled_frame_rate_where_iou_only_fragments |
+| E-TUBE-14 | Predicted box balloons during long occlusion | Kalman aspect/height velocities keep integrating while a track is unseen; the predicted box grows over the scene and re-attaches to junk (seen in the session-08 debug frames). | KalmanBoxFilter clamps predicted height and aspect to 0.6–1.6× the last measurement and zeroes the size velocities when the clamp engages. | implemented | test_tubes.py::test_predicted_box_does_not_balloon_through_long_occlusion |
 | E-TUBE-12 | Feet occluded, foot point wrong | Person behind counter. | FloorPoint.source=fallback_bbox_bottom and uncertainty widened; fusion tolerances read it. | implemented | test_tubes.py::test_occluded_feet_widen_uncertainty_and_tag_source |
 
 ## Ring 3a · event compiler

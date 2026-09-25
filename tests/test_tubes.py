@@ -136,3 +136,27 @@ def test_heartbeat_born_static_track_survives_roi_ticks_and_confirms_on_next_hea
     tr2.update([full], 0, det_source="heartbeat")
     live, _ = tr2.update([], 1000, det_source="heartbeat")
     assert live == []
+
+
+@pytest.mark.edge("E-TUBE-14")
+def test_predicted_box_does_not_balloon_through_long_occlusion():
+    from vi.tubes import KalmanBoxFilter
+    kf = KalmanBoxFilter(box(100, 100, 140, 220))
+    # two noisy updates that suggest the box is growing fast
+    kf.predict(0.25); kf.update(box(100, 96, 142, 228))
+    kf.predict(0.25); kf.update(box(100, 92, 145, 236))
+    for _ in range(40):                      # 10 s unseen
+        b = kf.predict(0.25)
+    assert 0.6 * 144 <= b.height <= 1.6 * 144 and 0.6 * (45 / 144) <= b.width / b.height <= 1.6 * (45 / 144)
+
+
+@pytest.mark.edge("E-DET-11")
+def test_birth_gates_reject_tiny_bodies_and_low_confidence_non_persons():
+    tr = ByteTracker("c1", confirm_ticks=1)
+    tiny = Detection(box=box(10, 10, 20, 38), class_label="person", confidence=0.9)     # 28 px tall
+    bag = Detection(box=box(200, 10, 260, 100), class_label="suitcase", confidence=0.55)
+    ok_bag = Detection(box=box(400, 10, 460, 100), class_label="suitcase", confidence=0.7)
+    person = Detection(box=box(600, 10, 640, 130), class_label="person", confidence=0.55)
+    live, _ = tr.update([tiny, bag, ok_bag, person], 0)
+    assert sorted(t.class_label for t in live) == ["person", "suitcase"]
+    assert all(t.box.height >= 32 for t in live)

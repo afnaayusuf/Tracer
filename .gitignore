@@ -3,3 +3,5 @@ __pycache__/
 .pytest_cache/
 data/episodes/
 data/synthetic/
+data/keyframes/
+data/debug/

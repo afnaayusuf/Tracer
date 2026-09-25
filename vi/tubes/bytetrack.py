@@ -52,6 +52,7 @@ class ByteTracker:
                  match_iou: float = 0.2, low_match_iou: float = 0.4, buffer: float = 0.4,
                  max_occluded_ms: int = 3000, confirm_ticks: int = 2, ambig_margin: float = 0.1,
                  first_tick_gate: float = 1.0, static_grace_ms: int = 1500,
+                 min_birth_height_px: float = 32.0, birth_thr: dict[str, float] | None = None,
                  exit_boxes: list[Box] | None = None, modality: Modality = Modality.rgb,
                  offset_ms: int = 0, keyframe_sink: Callable[[str, int, Box], str] | None = None):
         self.camera_id = camera_id
@@ -63,6 +64,10 @@ class ByteTracker:
         self.ambig_margin = ambig_margin
         self.first_tick_gate = first_tick_gate
         self.static_grace_ms = static_grace_ms   # E-GATE-01: unconfirmed heartbeat-born tracks wait for the next heartbeat
+        # E-DET-11: births need a body big enough to track and describe, and non-person classes
+        # need more confidence than people (zoomed crops read cardboard as "suitcase" at 0.5).
+        self.min_birth_height_px = min_birth_height_px
+        self.birth_thr = {"person": high_thr, "*": max(high_thr, 0.65)} | (birth_thr or {})
         self.exit_boxes = exit_boxes or []
         self.modality = modality
         self.offset_ms = offset_ms
@@ -172,6 +177,10 @@ class ByteTracker:
                 del self._tracks[tr.tube.tube_id]
         for j in ud_high:                                     # births only from high-confidence
             d = high[j]
+            if d.box.height < self.min_birth_height_px:
+                continue
+            if d.confidence < self.birth_thr.get(d.class_label, self.birth_thr["*"]):
+                continue
             tid = self._new_id(t_ms)
             tube = Tube(tube_id=tid, camera_id=self.camera_id, class_label=d.class_label, state=TubeState.born,
                         born=self._t(t_ms), last_seen=self._t(t_ms), box=d.box, modality=self.modality)
