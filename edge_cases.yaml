@@ -187,8 +187,8 @@ cases:
   ring: ring2
   title: Re-entry after leaving
   trigger: Same person returns minutes later.
-  handling: New tube; fusion links to the same entity via ReID + gallery; the agent reports entity, not tube.
-  status: planned
+  handling: TubeLinker ties a newborn tube to an entity whose tube went lost within 30 s and 400 px when appearance cosine >= 0.75; emits Event(relink); the agent reports entities, not tubes.
+  status: implemented
 - id: E-TUBE-05
   ring: ring2
   title: Same person in two overlapping cameras
@@ -211,8 +211,8 @@ cases:
   ring: ring2
   title: Appearance drift within a day
   trigger: Jacket on/off; bag picked up.
-  handling: Multiple exemplars per entity; embedding refresh on confident matches; oldest expire.
-  status: planned
+  handling: Per-entity EMA embedding plus up to 5 exemplars refreshed on active ticks; matching takes the best of EMA and exemplars so a jacket-off entity still links.
+  status: implemented
 - id: E-TUBE-09
   ring: ring2
   title: Carried object is not its own tube

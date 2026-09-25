@@ -24,6 +24,7 @@ class EventType(str, Enum):
     run = "run"
     crowd = "crowd"
     handoff = "handoff"
+    relink = "relink"            # E-TUBE-04: newborn tube tied to a lost one by appearance (same camera)
     impossible_transition = "impossible_transition"
     # scene-state events (Ring 3a, from I-frames / gate)
     illumination_change = "illumination_change"

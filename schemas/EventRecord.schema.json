@@ -160,6 +160,7 @@
         "run",
         "crowd",
         "handoff",
+        "relink",
         "impossible_transition",
         "illumination_change",
         "door_state_change",

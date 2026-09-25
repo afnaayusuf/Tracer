@@ -70,6 +70,13 @@ foot points + tile-graph transit bounds + ReID cosine; overlapping cameras merge
 entity; best view elected for enrichment. Gallery match stamps names; misses stay anonymous
 with stable ids. Slice: `SimpleIoUTracker`. **MEASURE:** HOTA/IDF1, cross-camera merge accuracy.
 
+**Intra-camera re-linking (measured need, session 10):** on the warehouse clip frame-nano left 15
+tubes for 10–11 people with zero rebirths: fragmentation comes from occlusions longer than the
+2.5 s limit at the packing table. `TubeLinker` ties a newborn tube to an entity whose tube went
+`lost` within 30 s and 400 px when appearance cosine ≥ 0.75, keeps a per-entity EMA + 5 exemplars,
+and emits `Event(relink)` for auditability. Embedders: SigLIP 2 image tower (Apache-2.0, reliable
+download) by default on GPU; OSNet (MIT) once weight hosting is verified; colour histogram on CPU.
+
 **Ring 3a — event compiler.** Deterministic predicates over tube snapshots, zones, tile graph and
 gate results; zero model calls. Tube events: enter_zone, exit_zone, dwell, loiter, approach,
 meet, pickup, drop, left_behind, asset_missing_from_home, fall, run, crowd, handoff,

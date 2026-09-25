@@ -1,6 +1,6 @@
 # Edge-case registry
 
-Generated from `edge_cases.yaml` by `make edge-doc`. 78 cases, 38 implemented and tested.
+Generated from `edge_cases.yaml` by `make edge-doc`. 78 cases, 40 implemented and tested.
 
 Status: **implemented** = code path exists and a test marked `@pytest.mark.edge("ID")` exercises it; **planned** = month-1 scope; **deferred** = tracked, not month 1.
 
@@ -52,11 +52,11 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | E-TUBE-01 | ID switch when paths cross | Two people cross; IoU ambiguous. | Keep best match; record other as merge_candidate; never silently merge; fusion may later resolve with ReID. | implemented | test_tubes.py::test_crossing_paths_flag_merge_candidates_instead_of_guessing |
 | E-TUBE-02 | Occlusion | Person behind furniture or another person. | state=occluded with occluded_since; after max_occluded_ms becomes lost (or exited if last box touched an exit zone). | implemented | test_tubes.py::test_occlusion_then_lost_or_exited |
 | E-TUBE-03 | Long stationary dwell | Sleeping person; parked object. | Heartbeat detections with det_source=heartbeat keep the track active. | implemented | test_tubes.py::test_heartbeat_detection_keeps_stationary_track_active |
-| E-TUBE-04 | Re-entry after leaving | Same person returns minutes later. | New tube; fusion links to the same entity via ReID + gallery; the agent reports entity, not tube. | planned | — |
+| E-TUBE-04 | Re-entry after leaving | Same person returns minutes later. | TubeLinker ties a newborn tube to an entity whose tube went lost within 30 s and 400 px when appearance cosine >= 0.75; emits Event(relink); the agent reports entities, not tubes. | implemented | test_reid.py::test_newborn_relinks_to_recently_lost_entity_with_matching_appearance<br>test_reid.py::test_relink_refuses_long_gaps_far_jumps_and_exited_tubes |
 | E-TUBE-05 | Same person in two overlapping cameras | Overlap region. | Per-camera tracker never merges; fusion merges by floor distance + ReID + time; enrichment once per entity, best view elected. | planned | — |
 | E-TUBE-06 | Hand-off outside transit bounds | Entity appears in a non-adjacent tile too fast. | impossible_transition event; no merge; anomaly surfaced. | planned | — |
 | E-TUBE-07 | Blind-spot ambiguity | Two enter a blind spot, one exits. | Delay-state keeps both candidates with probabilities; answer states ambiguity. | deferred | — |
-| E-TUBE-08 | Appearance drift within a day | Jacket on/off; bag picked up. | Multiple exemplars per entity; embedding refresh on confident matches; oldest expire. | planned | — |
+| E-TUBE-08 | Appearance drift within a day | Jacket on/off; bag picked up. | Per-entity EMA embedding plus up to 5 exemplars refreshed on active ticks; matching takes the best of EMA and exemplars so a jacket-off entity still links. | implemented | test_reid.py::test_gallery_follows_appearance_drift |
 | E-TUBE-09 | Carried object is not its own tube | Bag on shoulder; keys in hand. | carried_item attribute on the person tube; object tube only when placed and stationary. | planned | — |
 | E-TUBE-10 | Pets, strollers, wheelchairs | Non-person moving classes; child inside stroller. | Class-specific lifecycle; stroller+child handled as one tube with carried_item=child hint. | deferred | — |
 | E-TUBE-13 | Fragmentation at sampled frame rate | Decode at 2 fps means a walking person moves half a box width between ticks; IoU association breaks the tube. | ByteTracker with dt-aware Kalman, buffered IoU and a first-tick centre gate keeps fragmentation at 1.0 down to ~4-6 fps (synthetic); below ~3 fps motion-only association is ambiguous by construction, so active tiles decode at >=4 fps and 2 fps is for quiet tiles only. | implemented | test_tubes.py::test_bytetracker_survives_sampled_frame_rate_where_iou_only_fragments |

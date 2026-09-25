@@ -29,7 +29,8 @@ from vi.gate import FrameDiffGate, HeartbeatScheduler
 from vi.ingest import VideoReader
 from vi.schemas import CamTime, Provenance, Tick, TubeSnapshot
 from vi.schemas.episode import CastMember, EpisodeStatus
-from vi.tubes import TRACKERS
+from vi.reid import crop_for_embedding, make_embedder
+from vi.tubes import TRACKERS, TubeLinker
 
 
 def main() -> None:
@@ -49,6 +50,10 @@ def main() -> None:
     ap.add_argument("--heartbeat-ms", type=int, default=1000, help="hybrid: full-frame detection period on active tiles")
     ap.add_argument("--quiet-heartbeat-ms", type=int, default=10000)
     ap.add_argument("--debug-frames", type=int, default=0, help="save N annotated frames to data/debug/<episode>/")
+    ap.add_argument("--reid", choices=["none", "auto", "hist", "siglip", "osnet"], default="none",
+                    help="appearance embeddings + TubeLinker (E-TUBE-04); auto = osnet > siglip > hist")
+    ap.add_argument("--reid-every-ticks", type=int, default=8, help="gallery refresh cadence for active tubes")
+    ap.add_argument("--reid-sim", type=float, default=0.75)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--max-frames", type=int, default=600)
     ap.add_argument("--zones", default=None, help="JSON zones file; default = edge exits + centre floor")
@@ -89,6 +94,11 @@ def main() -> None:
     debug_every = max(1, int(a.fps * 1.5)) if a.debug_frames else 0     # one frame every ~1.5 s until N saved
     duplicate_pairs: list[dict] = []                # two live person tubes on one body: the hybrid bug, caught in the act
     dup_frames: list[str] = []
+    embedder = make_embedder(a.reid) if a.reid != "none" else None
+    linker = TubeLinker(a.camera, sim_thr=a.reid_sim) if embedder else None
+    embed_ms: list[float] = []
+    last_embed_tick: dict[str, int] = {}
+    relink_events = 0
     debug_paths: list[str] = []
     person_dets: list[int] = []
     concurrent_persons: list[int] = []
@@ -153,6 +163,30 @@ def main() -> None:
             if t.state.value == "active" and t.tube_id not in confirmed_ids:
                 confirmed_ids.add(t.tube_id)
                 confirmed_by_origin[origin_of.get(t.tube_id, "unknown")] += 1
+        if linker is not None:
+            due_birth = [t for t in live if t.class_label == "person" and t.tube_id not in last_embed_tick]
+            due_refresh = [t for t in live if t.class_label == "person" and t.state.value == "active"
+                           and t.tube_id in last_embed_tick and frames - last_embed_tick[t.tube_id] >= a.reid_every_ticks]
+            todo = due_birth + due_refresh
+            if todo:
+                t0 = time.perf_counter()
+                embs = embedder.embed([crop_for_embedding(fr.rgb, t.box) for t in todo])
+                embed_ms.append((time.perf_counter() - t0) * 1000)
+                for t, e in zip(todo, embs):
+                    last_embed_tick[t.tube_id] = frames
+                    if t.tube_id in {x.tube_id for x in due_birth}:
+                        ev = linker.on_birth(t, e, fr.pts_ms)
+                        if ev is not None:
+                            events.append(ev)
+                            relink_events += 1
+                            print(f"t={fr.pts_ms:7d}  relink                 {ev.subject_tube_ids[0]} -> {ev.subject_tube_ids[1]} sim={ev.payload['similarity']}")
+                    else:
+                        linker.on_refresh(t, e)
+            for t in live:
+                if t.class_label == "person":
+                    t.entity_id = linker.entity_of(t.tube_id)
+            for t in closed:
+                linker.on_close(t, fr.pts_ms)
         persons = [t for t in live if t.class_label == "person" and t.state.value in ("active", "born")]
         for i in range(len(persons)):
             for j in range(i + 1, len(persons)):
@@ -222,6 +256,10 @@ def main() -> None:
         "max_concurrent_persons": max(concurrent_persons) if concurrent_persons else 0,
         "person_visibility_duty": round(state_ticks["active"] / max(1, state_ticks["active"] + state_ticks["occluded"]), 3),
         "fragmentation_est": round(sum(1 for t in tubes if t.class_label == "person") / max(1.0, float(np.mean(person_dets))), 2) if person_dets else None,
+        "reid": embedder.name if embedder else "none",
+        "entities": linker.entities if linker else None, "relinks": linker.relinks if linker else None,
+        "entities_per_concurrent": round(linker.entities / max(1, max(concurrent_persons) if concurrent_persons else 1), 2) if linker else None,
+        "embed_ms_p50": round(float(np.median(embed_ms)), 2) if embed_ms else None,
         "births_by_origin": dict(births_by_origin), "confirmed_by_origin": dict(confirmed_by_origin),
         "rebirths": rebirths, "duplicate_pairs": duplicate_pairs, "duplicate_frames": dup_frames,
         "debug_frames": debug_paths,
