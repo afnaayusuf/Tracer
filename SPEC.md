@@ -36,8 +36,9 @@ reconstruction on the CPU path (libavcodec `+export_mvs` with loop-filter/IDCT s
 PyNvVideoCodec 2.1 decode statistics when the camera is already on NVDEC). Per-camera adaptive
 noise floor, MV-field coherence to reject PTZ/shake, luminance-step detection for scene-state.
 Stationary blindness is by design and is covered by **heartbeat detections**: `HeartbeatScheduler`
-runs a full-frame detection at episode open, every 1 s on active tiles and every 10 s on quiet
-tiles, merged with the ROI detections (`--detect hybrid` in the slice). Measured on real footage
+adds the full frame as one more crop in the ROI batch at episode open, every 1 s on active tiles
+and every 10 s on quiet tiles (`--detect hybrid`); all detections of a tick are deduplicated
+class-wise, complete boxes beating crop-truncated ones (E-DET-10). Measured on real footage
 in session 05: ROI-only detection lost standing people within 2.5 s regardless of tracker. Fallback for MJPEG /
 intra-only streams: frame differencing at 1 fps behind the same interface (`vi/gate/base.py`).
 Slice implementation: `FrameDiffGate`. Production: `MVGate` (week 3). **MEASURE:** gate FN rate,

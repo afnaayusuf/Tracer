@@ -1,6 +1,6 @@
 # Edge-case registry
 
-Generated from `edge_cases.yaml` by `make edge-doc`. 75 cases, 35 implemented and tested.
+Generated from `edge_cases.yaml` by `make edge-doc`. 76 cases, 36 implemented and tested.
 
 Status: **implemented** = code path exists and a test marked `@pytest.mark.edge("ID")` exercises it; **planned** = month-1 scope; **deferred** = tracked, not month 1.
 
@@ -42,6 +42,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | E-DET-07 | Fisheye or wide-lens distortion | Homography from a distorted image. | fov_class from scene card; undistort before foot-point projection. | deferred | — |
 | E-DET-08 | IR appearance shift lowers recall | Night mode. | Measured on night eval set before any enhancer; enhancer only if gap is real and license clear. | planned | — |
 | E-DET-09 | Static furniture and fixtures become tubes | Detector emits dining table, tv, chair as objects; tracker births permanent tubes for them. | Only TUBE_CLASSES (people, animals, vehicles, carried bags) become tubes; furniture is a scene-card asset owned by zones and heartbeats. | implemented | test_eval_mot.py::test_default_zones_and_tube_classes |
+| E-DET-10 | One object, several detections | A person straddles two adjacent ROI crops, or is seen by both a crop and the full-frame heartbeat with boxes of different extent; each becomes a tube. | Every tick's detections pass through dedupe_detections (class-wise, IoU>=0.5 or intersection-over-smaller>=0.6); complete boxes beat crop-truncated ones. Measured in session 06 as max_concurrent 13 on a 9-person frame. | implemented | test_detect_roi.py::test_dedupe_prefers_complete_box_over_crop_truncated_partials |
 
 ## Ring 2 · tubes and fusion
 

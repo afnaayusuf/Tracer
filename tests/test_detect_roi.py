@@ -82,3 +82,25 @@ def test_detector_pads_every_call_to_the_traced_batch():
     assert len(single) == 1 and det.model.seen == [8]                 # padded to the traced batch
     eleven = det.detect_batch([np.zeros((50, 50, 3), np.uint8)] * 11)
     assert len(eleven) == 11 and det.model.seen[1:] == [8, 8]         # 8 + (3 padded to 8), 11 results back
+
+
+@pytest.mark.edge("E-DET-10")
+def test_dedupe_prefers_complete_box_over_crop_truncated_partials():
+    from vi.detect import dedupe_detections, full_frame_roi
+    from vi.detect.roi import ROI
+    # one person at frame x 90..140 straddles two adjacent crops; each crop sees a partial view
+    left = remap_detections([Detection(box=Box(x1=90, y1=50, x2=100, y2=170), class_label="person", confidence=0.7)],
+                            ROI(x1=0, y1=0, x2=100, y2=200), 640, 480)
+    right = remap_detections([Detection(box=Box(x1=0, y1=52, x2=40, y2=168), class_label="person", confidence=0.8)],
+                             ROI(x1=100, y1=0, x2=300, y2=200), 640, 480)
+    whole = remap_detections([Detection(box=Box(x1=90, y1=50, x2=140, y2=170), class_label="person", confidence=0.6)],
+                             full_frame_roi(640, 480), 640, 480)
+    assert left[0].roi_truncated and right[0].roi_truncated and not whole[0].roi_truncated
+    out = dedupe_detections(left + right + whole)
+    assert len(out) == 1 and out[0].box.x1 == 90 and out[0].box.x2 == 140     # the complete box wins
+    # two genuinely different people survive
+    other = Detection(box=Box(x1=400, y1=50, x2=450, y2=170), class_label="person", confidence=0.9)
+    assert len(dedupe_detections(out + [other])) == 2
+    # a suitcase overlapping a person is a different class: kept
+    bag = Detection(box=Box(x1=100, y1=120, x2=130, y2=170), class_label="suitcase", confidence=0.9)
+    assert len(dedupe_detections(out + [bag])) == 2

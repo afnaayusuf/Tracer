@@ -17,7 +17,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from vi.detect import blobs_to_rois, crop_roi, is_tube_class, merge_detections, pad_batch, remap_detections
+from vi.detect import (blobs_to_rois, crop_roi, dedupe_detections, full_frame_roi, is_tube_class, pad_batch,
+                       remap_detections)
 try:
     from vi.detect.rfdetr import RFDETRDetector
 except ImportError:  # CPU runtime: only --model fake works
@@ -56,11 +57,12 @@ def main() -> None:
 
     prov = Provenance(kb_version=1, pipeline_git="slice_gpu")
     reader = VideoReader(a.camera, a.source, target_fps=a.fps, max_width=640, want_rgb=True)
+    batch = 1 if a.detect == "frame" else a.batch          # frame mode: one image per tick, trace at 1
     if a.model == "fake":
         from vi.detect.fake import BrightBlobDetector
-        det = BrightBlobDetector(threshold=a.threshold, batch_size=a.batch)   # CPU smoke path (tests, no GPU)
+        det = BrightBlobDetector(threshold=a.threshold, batch_size=batch)   # CPU smoke path (tests, no GPU)
     else:
-        det = RFDETRDetector(size=a.model, threshold=a.threshold, batch_size=a.batch)
+        det = RFDETRDetector(size=a.model, threshold=a.threshold, batch_size=batch)
     gate = FrameDiffGate(a.camera)
     kf = KeyframeStore(Path(a.out).parent / "keyframes")
     current = {"frame": None}
@@ -101,22 +103,20 @@ def main() -> None:
         stage["gate"] += time.perf_counter() - t0
         events = compiler.on_gate(g)
         t0 = time.perf_counter()
-        dets = []
         det_source = "detector"
-        if a.detect in ("roi", "hybrid"):
-            rois = blobs_to_rois(g.blobs, w, h, stride=fr.stride)
-            for i in range(0, len(rois), a.batch):
-                chunk = rois[i:i + a.batch]
-                crops, real = pad_batch([crop_roi(fr.rgb, r) for r in chunk], a.batch)
-                for r, d in zip(chunk, det.detect_batch(crops)[:real]):
-                    dets += remap_detections(d, r, w, h)
+        rois = blobs_to_rois(g.blobs, w, h, stride=fr.stride) if a.detect in ("roi", "hybrid") else []
         tile_active = len(tracker._tracks) > 0
         if a.detect == "frame" or (a.detect == "hybrid" and hb.due(fr.pts_ms, tile_active)):
-            full = det.detect(fr.rgb)
-            dets = merge_detections(dets, full) if dets else full
+            rois.append(full_frame_roi(w, h))                   # heartbeat = one more crop in the batch
             det_source = "heartbeat"
             heartbeats += 1
-        dets = [d for d in dets if is_tube_class(d.class_label)]
+        dets = []
+        for i in range(0, len(rois), batch):
+            chunk = rois[i:i + batch]
+            crops, real = pad_batch([crop_roi(fr.rgb, r) for r in chunk], batch)
+            for r, d in zip(chunk, det.detect_batch(crops)[:real]):
+                dets += remap_detections(d, r, w, h)
+        dets = dedupe_detections([d for d in dets if is_tube_class(d.class_label)])   # E-DET-10
         person_dets.append(sum(1 for d in dets if d.class_label == "person" and d.confidence >= 0.5))
         dt_detect = time.perf_counter() - t0
         if frames >= a.warmup:
@@ -165,6 +165,9 @@ def main() -> None:
         "max_concurrent_persons": max(concurrent_persons) if concurrent_persons else 0,
         "person_visibility_duty": round(state_ticks["active"] / max(1, state_ticks["active"] + state_ticks["occluded"]), 3),
         "fragmentation_est": round(sum(1 for t in tubes if t.class_label == "person") / max(1.0, float(np.mean(person_dets))), 2) if person_dets else None,
+        "tubes_per_concurrent": round(sum(1 for t in tubes if t.class_label == "person") / max(1, max(concurrent_persons) if concurrent_persons else 1), 2),
+        "mean_person_tube_life_s": round(float(np.mean([(t.last_seen.corrected_ms() - t.born.corrected_ms()) / 1000
+                                                        for t in tubes if t.class_label == "person"] or [0])), 2),
         "merge_candidates_flagged": sum(1 for t in tubes if t.merge_candidates),
         "tubes_by_final_state": dict(Counter(t.state.value for t in tubes)),
         "classes": dict(Counter(t.class_label for t in tubes)),

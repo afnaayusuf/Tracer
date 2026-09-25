@@ -61,14 +61,48 @@ def crop_roi(frame_rgb: np.ndarray, roi: ROI) -> np.ndarray:
 
 
 def remap_detections(dets: list[Detection], roi: ROI, frame_w: int, frame_h: int) -> list[Detection]:
-    """Shift crop-space boxes back to frame space and flag boxes touching the frame border
-    (E-DET-02): a person cut off at the edge has an unreliable foot point."""
+    """Shift crop-space boxes back to frame space. Flags: `truncated` when the box touches the
+    frame border (E-DET-02, unreliable foot point); `roi_truncated` when it touches the crop
+    border but not the frame border (E-DET-10, a partial view that a full-frame or neighbouring
+    crop may have seen whole)."""
     out = []
+    rw, rh = roi.x2 - roi.x1, roi.y2 - roi.y1
     for d in dets:
+        at_roi_edge = d.box.x1 <= EDGE_PX or d.box.y1 <= EDGE_PX or d.box.x2 >= rw - EDGE_PX or d.box.y2 >= rh - EDGE_PX
         b = Box(x1=d.box.x1 + roi.x1, y1=d.box.y1 + roi.y1, x2=d.box.x2 + roi.x1, y2=d.box.y2 + roi.y1)
         truncated = b.x1 <= EDGE_PX or b.y1 <= EDGE_PX or b.x2 >= frame_w - EDGE_PX or b.y2 >= frame_h - EDGE_PX
-        out.append(d.model_copy(update={"box": b, "truncated": truncated}))
+        out.append(d.model_copy(update={"box": b, "truncated": truncated,
+                                        "roi_truncated": bool(at_roi_edge and not truncated)}))
     return out
+
+
+def full_frame_roi(frame_w: int, frame_h: int) -> ROI:
+    """The heartbeat's full-frame pass is just one more crop in the batch (R10 / R12)."""
+    return ROI(x1=0, y1=0, x2=frame_w, y2=frame_h, source_blobs=0)
+
+
+def _ios(a: Box, b: Box) -> float:
+    """Intersection over the smaller box: catches a partial (crop-truncated) view sitting
+    inside a complete detection, which plain IoU under-scores."""
+    ix1, iy1 = max(a.x1, b.x1), max(a.y1, b.y1)
+    ix2, iy2 = min(a.x2, b.x2), min(a.y2, b.y2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    return (ix2 - ix1) * (iy2 - iy1) / max(1e-6, min(a.area, b.area))
+
+
+def dedupe_detections(dets: list[Detection], iou_thr: float = 0.5, ios_thr: float = 0.6) -> list[Detection]:
+    """E-DET-10: one object, one detection per frame. Detections from overlapping crops and from
+    the full-frame heartbeat are merged class-wise; complete boxes beat crop-truncated ones,
+    then higher confidence wins."""
+    ranked = sorted(dets, key=lambda d: (not d.roi_truncated, d.confidence), reverse=True)
+    kept: list[Detection] = []
+    for d in ranked:
+        dup = any(k.class_label == d.class_label and (k.box.iou(d.box) >= iou_thr or _ios(k.box, d.box) >= ios_thr)
+                  for k in kept)
+        if not dup:
+            kept.append(d)
+    return kept
 
 
 def pad_batch(crops: list[np.ndarray], batch_size: int) -> tuple[list[np.ndarray], int]:
@@ -84,17 +118,5 @@ def pad_batch(crops: list[np.ndarray], batch_size: int) -> tuple[list[np.ndarray
 
 
 def merge_detections(primary: list[Detection], secondary: list[Detection], iou_thr: float = 0.5) -> list[Detection]:
-    """Union of two detection sets on the same frame; when boxes overlap above iou_thr the
-    higher-confidence one is kept. Used to combine ROI detections with a full-frame heartbeat."""
-    out = list(primary)
-    for d in secondary:
-        dup = None
-        for i, p in enumerate(out):
-            if p.class_label == d.class_label and p.box.iou(d.box) >= iou_thr:
-                dup = i
-                break
-        if dup is None:
-            out.append(d)
-        elif d.confidence > out[dup].confidence:
-            out[dup] = d
-    return out
+    """Union of two detection sets on the same frame, deduplicated (see dedupe_detections)."""
+    return dedupe_detections(list(primary) + list(secondary), iou_thr=iou_thr)

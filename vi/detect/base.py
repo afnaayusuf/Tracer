@@ -24,6 +24,7 @@ class Detection(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     embedding: list[float] | None = None   # R14: ReID alongside the box
     truncated: bool = False                # E-DET-02: box touches the frame border
+    roi_truncated: bool = False            # E-DET-10: box touches its crop border (partial view of the object)
 
 
 class Detector(Protocol):

@@ -152,6 +152,12 @@ cases:
   trigger: Detector emits dining table, tv, chair as objects; tracker births permanent tubes for them.
   handling: Only TUBE_CLASSES (people, animals, vehicles, carried bags) become tubes; furniture is a scene-card asset owned by zones and heartbeats.
   status: implemented
+- id: E-DET-10
+  ring: ring1
+  title: One object, several detections
+  trigger: A person straddles two adjacent ROI crops, or is seen by both a crop and the full-frame heartbeat with boxes of different extent; each becomes a tube.
+  handling: Every tick's detections pass through dedupe_detections (class-wise, IoU>=0.5 or intersection-over-smaller>=0.6); complete boxes beat crop-truncated ones. Measured in session 06 as max_concurrent 13 on a 9-person frame.
+  status: implemented
 # ---------------- ring 2 tubes / fusion ----------------
 - id: E-TUBE-01
   ring: ring2
