@@ -101,3 +101,39 @@ def test_store_round_trips_a_utc_millisecond_timestamp():
         insert_ignore(conn, scripts, [dict(episode_id="ep_x", text="t", rendered_at_ms=now)])
     with engine.connect() as conn:
         assert conn.execute(select(scripts.c.rendered_at_ms)).scalar() == now
+
+
+def test_extract_json_tolerates_fences_prose_and_nesting():
+    from vi.agent import extract_json
+    assert extract_json('```json\n{"action":"answer","text":"hi {x}","citations":[]}\n```') == '{"action":"answer","text":"hi {x}","citations":[]}'
+    assert extract_json('Sure! Here it is: {"action":"tool","tool":"clip","args":{"entity_id":"cam1:E1"}} thanks') \
+        == '{"action":"tool","tool":"clip","args":{"entity_id":"cam1:E1"}}'
+    assert extract_json('{"a": "brace in string }"}') == '{"a": "brace in string }"}'
+    assert extract_json("no json here") == "no json here"
+
+
+def test_transformers_backend_pipeline_with_a_stub_model():
+    """The loader/generate/decode path, with a stub standing in for the 4B model."""
+    import numpy as np
+    from vi.agent.loop import TransformersBackend
+
+    class Tok:
+        def apply_chat_template(self, msgs, **kw):
+            assert msgs[0]["role"] == "system" and "JSON object only" in msgs[0]["content"]
+            return {"input_ids": np.zeros((1, 3), dtype=int)}
+        def decode(self, ids, skip_special_tokens=True):
+            return 'ok: {"action":"clarify","question":"which person?"}'
+
+    class Model:
+        def generate(self, **kw):
+            return np.zeros((1, 3 + 5), dtype=int)
+
+    class T:  # minimal torch stand-in
+        @staticmethod
+        def no_grad():
+            import contextlib; return contextlib.nullcontext()
+
+    b = TransformersBackend.__new__(TransformersBackend)
+    b.torch, b.model, b.tok, b.device, b.max_new_tokens = T(), Model(), Tok(), "cpu", 10
+    out = b.complete([{"role": "system", "content": "sys"}, {"role": "user", "content": "q"}], {})
+    assert out == '{"action":"clarify","question":"which person?"}'

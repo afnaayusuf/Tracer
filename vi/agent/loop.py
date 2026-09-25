@@ -121,7 +121,79 @@ class OpenAIBackend:
             out = self._post({**base, "response_format": {"type": "json_schema", "json_schema": {"name": "agent_step", "schema": schema}}})
         except Exception:
             out = self._post({**base, "guided_json": schema})
-        return out["choices"][0]["message"]["content"]
+        return extract_json(out["choices"][0]["message"]["content"])
+
+
+def extract_json(text: str) -> str:
+    """Take the first balanced {...} object out of a model reply (code fences, prose, and
+    trailing text are all tolerated). Returns the raw text if none is found, so validation
+    fails loudly rather than silently."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        t = t[4:] if t.lower().startswith("json") else t
+    start = t.find("{")
+    if start < 0:
+        return text
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(t)):
+        c = t[i]
+        if in_str:
+            if esc: esc = False
+            elif c == "\\": esc = True
+            elif c == '"': in_str = False
+            continue
+        if c == '"': in_str = True
+        elif c == "{": depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return t[start:i + 1]
+    return text
+
+
+class TransformersBackend:
+    """In-process fallback when no server can be started: loads the model with transformers in the
+    runtime's own torch. No structured-output grammar; the loop validates and retries instead."""
+
+    name = "transformers"
+
+    def __init__(self, model_id: str = "Qwen/Qwen3.5-4B", max_new_tokens: int = 600, device: str | None = None):
+        import torch
+        from transformers import AutoProcessor, AutoTokenizer
+        self.torch = torch
+        self.model_id = model_id
+        self.max_new_tokens = max_new_tokens
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+        last = None
+        self.model = None
+        for loader in ("AutoModelForImageTextToText", "AutoModelForCausalLM", "AutoModel"):
+            try:
+                cls = getattr(__import__("transformers", fromlist=[loader]), loader)
+                self.model = cls.from_pretrained(model_id, dtype=dtype).to(self.device).eval()
+                self.loader = loader
+                break
+            except Exception as e:  # pragma: no cover
+                last = e
+        if self.model is None:
+            raise RuntimeError(f"could not load {model_id}: {last!r}")
+        try:
+            self.tok = AutoProcessor.from_pretrained(model_id)
+        except Exception:
+            self.tok = AutoTokenizer.from_pretrained(model_id)
+
+    def complete(self, messages: list[dict], schema: dict) -> str:
+        msgs = list(messages)
+        msgs[0] = {**msgs[0], "content": msgs[0]["content"] + "\nReply with the JSON object only, no prose."}
+        inputs = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True,
+                                              return_tensors="pt", return_dict=True)
+        inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+        with self.torch.no_grad():
+            out = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+        gen = out[0][inputs["input_ids"].shape[1]:]
+        tokenizer = getattr(self.tok, "tokenizer", self.tok)
+        return extract_json(tokenizer.decode(gen, skip_special_tokens=True))
 
 
 def run_tool(engine: Engine, step: ToolStep) -> Any:

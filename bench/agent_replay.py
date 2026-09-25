@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from vi.agent import FakeBackend, OpenAIBackend, ask, clip, get_script, search_entities, search_events, search_tubes
+from vi.agent import FakeBackend, OpenAIBackend, TransformersBackend, ask, clip, get_script, search_entities, search_events, search_tubes
 from vi.store import connect, load_episode_file
 
 
@@ -21,7 +21,7 @@ def main() -> None:
     ap.add_argument("--db", default="sqlite+pysqlite:///data/vi.db")
     ap.add_argument("--script-lines", type=int, default=40)
     ap.add_argument("--ask", action="append", default=[], help="question(s) to run through the agent loop")
-    ap.add_argument("--backend", choices=["fake", "openai"], default="fake")
+    ap.add_argument("--backend", choices=["fake", "openai", "transformers"], default="fake")
     ap.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     a = ap.parse_args()
@@ -45,7 +45,17 @@ def main() -> None:
            "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     answers = []
     if a.ask:
-        backend = FakeBackend() if a.backend == "fake" else OpenAIBackend(base_url=a.base_url, model=a.model)
+        if a.backend == "fake":
+            backend = FakeBackend()
+        elif a.backend == "openai":
+            backend = OpenAIBackend(base_url=a.base_url, model=a.model)
+        else:
+            try:
+                backend = TransformersBackend(model_id=a.model)
+                print(f"[agent] transformers backend loaded {a.model} via {backend.loader}")
+            except Exception as e:
+                print(f"[agent] transformers backend failed ({type(e).__name__}: {str(e)[:120]}); using fake backend")
+                backend = FakeBackend()
         for q in a.ask:
             res = ask(engine, q, ep, backend)
             answers.append(res)
