@@ -49,3 +49,12 @@ def test_pad_batch_fills_with_last_crop_and_reports_real_count():
     from vi.detect.roi import ROI
     c = crop_roi(frame, ROI(x1=5, y1=2, x2=15, y2=12))
     assert c.shape == (10, 10, 3) and c.flags["C_CONTIGUOUS"]
+
+
+def test_merge_detections_keeps_higher_confidence_duplicate_and_unions_the_rest():
+    from vi.detect import merge_detections
+    a = Detection(box=Box(x1=0, y1=0, x2=40, y2=100), class_label="person", confidence=0.6)
+    a2 = Detection(box=Box(x1=2, y1=1, x2=41, y2=101), class_label="person", confidence=0.9)
+    b = Detection(box=Box(x1=300, y1=0, x2=340, y2=100), class_label="person", confidence=0.7)
+    out = merge_detections([a], [a2, b])
+    assert len(out) == 2 and out[0].confidence == 0.9 and out[1] is b

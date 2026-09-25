@@ -48,7 +48,7 @@ class EventCompiler:
 
     def __init__(self, camera_id: str, zones: list[Zone], enter_ticks: int = 2, exit_ticks: int = 2,
                  dwell_ms: int = 10_000, tile_id: str | None = None, offset_ms: int = 0,
-                 moved_after_updates: int = 10):
+                 moved_after_updates: int = 10, open_grace_ms: int = 1500):
         self.camera_id = camera_id
         self.tile_id = tile_id
         self.zones = {z.zone_id: z for z in zones if z.camera_id == camera_id}
@@ -63,6 +63,8 @@ class EventCompiler:
         self._global_run = 0
         self._moved_fired = False
         self._ticks_seen = 0
+        self.open_grace_ms = open_grace_ms
+        self._open_t_ms: int | None = None
 
     def _t(self, t_ms: int) -> CamTime:
         return CamTime(cam_utc_ms=t_ms, offset_ms=self.offset_ms)
@@ -81,11 +83,13 @@ class EventCompiler:
     def on_tick(self, tubes: list[TubeSnapshot], t_ms: int) -> list[Event]:
         events: list[Event] = []
         live = {s.tube_id for s in tubes}
-        first_tick = self._ticks_seen == 0
+        if self._open_t_ms is None:
+            self._open_t_ms = t_ms
         self._ticks_seen += 1
-        if first_tick:
+        if t_ms - self._open_t_ms <= self.open_grace_ms:
             # E-EVT-10: whoever is already in frame when the episode opens did not "enter";
-            # seed zone memberships silently so enter_zone means a boundary was crossed.
+            # seed zone memberships silently (for a short grace window, since the gate needs
+            # a frame or two to warm up) so enter_zone means a boundary was crossed.
             for snap in tubes:
                 foot = snap.box.foot_point()
                 for z in self.zones.values():

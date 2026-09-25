@@ -1,6 +1,6 @@
 # Edge-case registry
 
-Generated from `edge_cases.yaml` by `make edge-doc`. 75 cases, 34 implemented and tested.
+Generated from `edge_cases.yaml` by `make edge-doc`. 75 cases, 35 implemented and tested.
 
 Status: **implemented** = code path exists and a test marked `@pytest.mark.edge("ID")` exercises it; **planned** = month-1 scope; **deferred** = tracked, not month 1.
 
@@ -20,11 +20,11 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 
 | ID | Case | Trigger | Handling | Status | Tests |
 |---|---|---|---|---|---|
-| E-GATE-01 | Stationary object is invisible to the gate | Person stops moving; bag placed and left; fallen person still. | Heartbeat detections on I-frames (1–2 s active tiles, 10–30 s quiet, always on asset homes) keep tubes alive; not the gate's job. | implemented | test_gate.py::test_stationary_object_fades_from_gate_by_design<br>test_tubes.py::test_heartbeat_detection_keeps_stationary_track_active |
+| E-GATE-01 | Stationary object is invisible to the gate | Person stops moving; bag placed and left; fallen person still. | HeartbeatScheduler runs a full-frame detection at episode open, every 1 s on active tiles and every 10 s on quiet ones (merged with ROI detections); measured on real footage as person_tubes and lost-vs-exited in bench/slice_gpu.py --detect hybrid. | implemented | test_gate.py::test_stationary_object_fades_from_gate_by_design<br>test_gate.py::test_heartbeat_fires_at_open_then_by_tile_state<br>test_tubes.py::test_heartbeat_detection_keeps_stationary_track_active |
 | E-GATE-02 | Lighting change looks like whole-frame motion | Light switch, IR-cut toggle, cloud passes. | Global luminance step detected before differencing; emitted as illumination_change scene-state event; blobs suppressed for that update. | implemented | test_events.py::test_gate_results_become_scene_state_events<br>test_gate.py::test_light_switch_is_luma_step_not_motion<br>test_ingest.py::test_reader_to_gate_on_synthetic_clip |
 | E-GATE-03 | Foliage, rain, insects, sensor noise | Persistent low-level motion that is not an object. | Adaptive noise floor (median block energy over history) × k; MV-field coherence test once MVGate lands. | implemented | test_gate.py::test_adaptive_noise_floor_ignores_sensor_noise_but_finds_object |
 | E-GATE-04 | Camera shake or PTZ move | Most of the frame changes at once. | active_fraction > threshold => global_motion; blobs suppressed, background frozen; sustained => camera_moved_suspect. | implemented | test_gate.py::test_camera_shake_is_global_motion_and_suppresses_blobs |
-| E-GATE-05 | Very slow motion under threshold | Someone creeping; object slid slowly. | Heartbeat detections catch state deltas the gate misses; gate FN rate is a tracked metric. | planned | — |
+| E-GATE-05 | Very slow motion under threshold | Someone creeping; object slid slowly. | Same HeartbeatScheduler full-frame pass catches motion below the gate threshold; gate FN rate stays a tracked metric. | implemented | test_gate.py::test_heartbeat_fires_at_open_then_by_tile_state |
 | E-GATE-06 | Motion in screens, mirrors, reflections | TV playing; mirror shows a person in another zone; steel reflects motion. | Scene card media_zones and reflective_surfaces become gate masks; tubes born inside them are reflection_suspect. | planned | — |
 | E-GATE-07 | Intra-only or all-I-frame streams | Encoder configured with no P-frames; no motion vectors. | Same fallback as E-ING-04. | planned | — |
 | E-GATE-08 | Night noise inflates motion energy | High-gain low-light mode. | Per-modality threshold profile; coherence weighted higher at night. | planned | — |
@@ -65,7 +65,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | ID | Case | Trigger | Handling | Status | Tests |
 |---|---|---|---|---|---|
 | E-EVT-01 | Zone boundary jitter | Foot point oscillates on a zone edge. | Hysteresis: enter after N consecutive inside ticks, exit after N outside. | implemented | test_events.py::test_zone_hysteresis_filters_boundary_jitter |
-| E-EVT-10 | Everyone in frame at episode open "enters" | First tick births every visible tube inside a zone; enter_zone fires for all of them at once. | EventCompiler seeds zone memberships silently on its first tick; enter_zone means a boundary was crossed during the episode. | implemented | test_events.py::test_tubes_present_at_episode_open_do_not_enter |
+| E-EVT-10 | Everyone in frame at episode open "enters" | First tick births every visible tube inside a zone; enter_zone fires for all of them at once. | EventCompiler seeds zone memberships silently for open_grace_ms (1.5 s) after its first tick, since the gate needs a frame to warm up; the open heartbeat makes that first tick non-empty. | implemented | test_events.py::test_tubes_present_at_episode_open_do_not_enter |
 | E-EVT-02 | Cross-camera event order under clock offset | Kitchen camera 2 s ahead of hallway. | Sort by corrected_ms; hand-off window tolerates offset_confidence. | planned | — |
 | E-EVT-03 | False pickup from occlusion of the shelf | Person stands in front of the asset home; heartbeat cannot see the asset. | Pickup requires asset absent on a heartbeat taken with nobody inside the zone, after a present reading; subject = visitors in between; no visitors => asset_missing_from_home with no blame. | implemented | test_events.py::test_pickup_requires_absence_with_nobody_in_zone<br>test_events.py::test_missing_asset_with_no_visitor_does_not_blame_anyone |
 | E-EVT-04 | Fall vs lying down on purpose | Person lies on sofa/bed. | rest zones from scene card suppress fall; fall requires vertical velocity + pose primitive outside rest zones. | deferred | — |

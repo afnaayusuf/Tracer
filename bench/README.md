@@ -6,7 +6,7 @@ checkpoints it to `data/bench/<ring>.jsonl` as it goes, so a killed Colab sessio
 | script | ring | GPU | dataset | row |
 |---|---|---|---|---|
 | slice_cpu.py | all (stubs) | none | synthetic | proves plumbing; run first, every day |
-| slice_gpu.py | 0–3a on real footage | L4 | own clip | reader → gate → ROIs → RF-DETR → tubes → events → episode file + birth keyframes; stage ms, tubes by state |
+| slice_gpu.py | 0–3a on real footage | L4 | own clip | reader → gate → ROIs (+ heartbeat) → RF-DETR → tubes → events → episode file + birth keyframes; `--detect roi\|frame\|hybrid`, person_tubes, visibility duty, fragmentation_est |
 | ring0_gate.py | 0 | CPU | VIRAT | gate FN rate, ms per GOP per stream, MV vs framediff |
 | ring1_detect.py | 1 | L4 | own clip / VIRAT | `--mode frame`: ms p50/p95 per frame at sampled fps; `--mode roi`: gate → packed ROI batches (nano/medium) |
 | ring2_tubes.py | 2 | CPU | synthetic, MOT17 | MOTA/IDF1/IDSW/fragmentation (vi/eval/mot.py); `--tracker simple\|byte`, `--sample-every` simulates 2–5 fps decode |

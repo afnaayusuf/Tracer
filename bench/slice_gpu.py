@@ -1,8 +1,9 @@
 """Real-footage slice (Day 4): reader -> gate -> ROIs -> RF-DETR -> tubes -> events -> episode file,
 with a native-res keyframe saved at every tube birth. One row to data/bench/slice_gpu.jsonl.
 
-  python bench/slice_gpu.py --source /content/HI_DEF_VIDEO.mp4 --fps 4 --model nano            # ByteTracker
-  python bench/slice_gpu.py --source /content/HI_DEF_VIDEO.mp4 --fps 4 --tracker simple --threshold 0.5
+  python bench/slice_gpu.py --source clip.mp4 --detect hybrid      # ROIs + 1 Hz full-frame heartbeat (default)
+  python bench/slice_gpu.py --source clip.mp4 --detect roi         # motion ROIs only (session 04/05 behaviour)
+  python bench/slice_gpu.py --source clip.mp4 --detect frame       # full frame every tick (upper bound on recall)
   python bench/slice_gpu.py --source clip.mp4 --zones data/zones/cam1.json --tile lobby
 """
 from __future__ import annotations
@@ -16,11 +17,14 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from vi.detect import blobs_to_rois, crop_roi, is_tube_class, pad_batch, remap_detections
-from vi.detect.rfdetr import RFDETRDetector
+from vi.detect import blobs_to_rois, crop_roi, is_tube_class, merge_detections, pad_batch, remap_detections
+try:
+    from vi.detect.rfdetr import RFDETRDetector
+except ImportError:  # CPU runtime: only --model fake works
+    RFDETRDetector = None  # type: ignore
 from vi.episode import EpisodeWriter, KeyframeStore
 from vi.events import EventCompiler, default_zones, load_zones
-from vi.gate import FrameDiffGate
+from vi.gate import FrameDiffGate, HeartbeatScheduler
 from vi.ingest import VideoReader
 from vi.schemas import CamTime, Provenance, Tick, TubeSnapshot
 from vi.schemas.episode import CastMember, EpisodeStatus
@@ -38,6 +42,10 @@ def main() -> None:
                     help="detector floor; ByteTracker re-attaches 0.1-0.5 detections and births only >=0.5")
     ap.add_argument("--tracker", choices=sorted(TRACKERS), default="byte")
     ap.add_argument("--warmup", type=int, default=3, help="frames excluded from timing (JIT profiling runs)")
+    ap.add_argument("--detect", choices=["roi", "frame", "hybrid"], default="hybrid",
+                    help="roi: motion ROIs only; frame: full frame every tick; hybrid: ROIs + full-frame heartbeat")
+    ap.add_argument("--heartbeat-ms", type=int, default=1000, help="hybrid: full-frame detection period on active tiles")
+    ap.add_argument("--quiet-heartbeat-ms", type=int, default=10000)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--max-frames", type=int, default=600)
     ap.add_argument("--zones", default=None, help="JSON zones file; default = edge exits + centre floor")
@@ -48,7 +56,11 @@ def main() -> None:
 
     prov = Provenance(kb_version=1, pipeline_git="slice_gpu")
     reader = VideoReader(a.camera, a.source, target_fps=a.fps, max_width=640, want_rgb=True)
-    det = RFDETRDetector(size=a.model, threshold=a.threshold, batch_size=a.batch)
+    if a.model == "fake":
+        from vi.detect.fake import BrightBlobDetector
+        det = BrightBlobDetector(threshold=a.threshold)          # CPU smoke path (tests, no GPU)
+    else:
+        det = RFDETRDetector(size=a.model, threshold=a.threshold, batch_size=a.batch)
     gate = FrameDiffGate(a.camera)
     kf = KeyframeStore(Path(a.out).parent / "keyframes")
     current = {"frame": None}
@@ -61,6 +73,11 @@ def main() -> None:
     closed_all = []
     tick_ms = int(1000 / a.fps)
     frames = 0
+    hb = HeartbeatScheduler(active_ms=a.heartbeat_ms, quiet_ms=a.quiet_heartbeat_ms)
+    heartbeats = 0
+    person_dets: list[int] = []
+    concurrent_persons: list[int] = []
+    state_ticks: Counter = Counter()
 
     for fr in reader.frames():
         if frames >= a.max_frames:
@@ -84,21 +101,32 @@ def main() -> None:
         stage["gate"] += time.perf_counter() - t0
         events = compiler.on_gate(g)
         t0 = time.perf_counter()
-        rois = blobs_to_rois(g.blobs, w, h, stride=fr.stride)
         dets = []
-        for i in range(0, len(rois), a.batch):
-            chunk = rois[i:i + a.batch]
-            crops, real = pad_batch([crop_roi(fr.rgb, r) for r in chunk], a.batch)
-            for r, d in zip(chunk, det.detect_batch(crops)[:real]):
-                dets += remap_detections(d, r, w, h)
+        det_source = "detector"
+        if a.detect in ("roi", "hybrid"):
+            rois = blobs_to_rois(g.blobs, w, h, stride=fr.stride)
+            for i in range(0, len(rois), a.batch):
+                chunk = rois[i:i + a.batch]
+                crops, real = pad_batch([crop_roi(fr.rgb, r) for r in chunk], a.batch)
+                for r, d in zip(chunk, det.detect_batch(crops)[:real]):
+                    dets += remap_detections(d, r, w, h)
+        tile_active = len(tracker._tracks) > 0
+        if a.detect == "frame" or (a.detect == "hybrid" and hb.due(fr.pts_ms, tile_active)):
+            full = det.detect(fr.rgb)
+            dets = merge_detections(dets, full) if dets else full
+            det_source = "heartbeat"
+            heartbeats += 1
         dets = [d for d in dets if is_tube_class(d.class_label)]
+        person_dets.append(sum(1 for d in dets if d.class_label == "person" and d.confidence >= 0.5))
         dt_detect = time.perf_counter() - t0
         if frames >= a.warmup:
             stage["detect"] += dt_detect
             detect_ms.append(dt_detect * 1000)
         t0 = time.perf_counter()
         before = len(tracker._tracks)
-        live, closed = tracker.update(dets, fr.pts_ms)
+        live, closed = tracker.update(dets, fr.pts_ms, det_source=det_source)
+        concurrent_persons.append(sum(1 for t in live if t.class_label == "person" and t.state.value == "active"))
+        state_ticks.update(t.state.value for t in live if t.class_label == "person")
         births += max(0, len(live) + len(closed) - before) if closed else max(0, len(live) - before)
         closed_all += closed
         stage["track"] += time.perf_counter() - t0
@@ -126,13 +154,17 @@ def main() -> None:
     st = reader.stats
     row = {
         "ring": "slice", "source": Path(a.source).name, "model": f"rf-detr-{a.model}", "sampled_fps": a.fps,
-        "tracker": a.tracker, "det_threshold": a.threshold,
+        "tracker": a.tracker, "detect": a.detect, "det_threshold": a.threshold, "heartbeats": heartbeats,
         "frames": frames, "decode_ms_per_frame": round(st.decode_ms_total / frames, 2),
         **{f"{k}_ms_per_frame": round(v * 1000 / frames, 2) for k, v in stage.items() if k != "detect"},
         "detect_ms_p50": round(float(np.median(detect_ms)), 2) if detect_ms else None,
         "detect_ms_p95": round(float(np.percentile(detect_ms, 95)), 2) if detect_ms else None,
         "tubes_total": len(tubes), "tubes_live_at_end": len(tracker._tracks),
         "person_tubes": sum(1 for t in tubes if t.class_label == "person"),
+        "person_dets_per_frame": round(float(np.mean(person_dets)), 2) if person_dets else 0,
+        "max_concurrent_persons": max(concurrent_persons) if concurrent_persons else 0,
+        "person_visibility_duty": round(state_ticks["active"] / max(1, state_ticks["active"] + state_ticks["occluded"]), 3),
+        "fragmentation_est": round(sum(1 for t in tubes if t.class_label == "person") / max(1.0, float(np.mean(person_dets))), 2) if person_dets else None,
         "merge_candidates_flagged": sum(1 for t in tubes if t.merge_candidates),
         "tubes_by_final_state": dict(Counter(t.state.value for t in tubes)),
         "classes": dict(Counter(t.class_label for t in tubes)),

@@ -35,8 +35,10 @@ cameras ─► Ring 0 bitstream gate (CPU, no decode)
 reconstruction on the CPU path (libavcodec `+export_mvs` with loop-filter/IDCT skipped, or
 PyNvVideoCodec 2.1 decode statistics when the camera is already on NVDEC). Per-camera adaptive
 noise floor, MV-field coherence to reject PTZ/shake, luminance-step detection for scene-state.
-Stationary blindness is by design and is covered by **heartbeat detections** on I-frames
-(1–2 s active tiles, 10–30 s quiet tiles, always on asset-home zones). Fallback for MJPEG /
+Stationary blindness is by design and is covered by **heartbeat detections**: `HeartbeatScheduler`
+runs a full-frame detection at episode open, every 1 s on active tiles and every 10 s on quiet
+tiles, merged with the ROI detections (`--detect hybrid` in the slice). Measured on real footage
+in session 05: ROI-only detection lost standing people within 2.5 s regardless of tracker. Fallback for MJPEG /
 intra-only streams: frame differencing at 1 fps behind the same interface (`vi/gate/base.py`).
 Slice implementation: `FrameDiffGate`. Production: `MVGate` (week 3). **MEASURE:** gate FN rate,
 ms per GOP per stream.

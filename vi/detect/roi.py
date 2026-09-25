@@ -81,3 +81,20 @@ def pad_batch(crops: list[np.ndarray], batch_size: int) -> tuple[list[np.ndarray
     while len(padded) < batch_size:
         padded.append(padded[-1])
     return padded, min(real, batch_size)
+
+
+def merge_detections(primary: list[Detection], secondary: list[Detection], iou_thr: float = 0.5) -> list[Detection]:
+    """Union of two detection sets on the same frame; when boxes overlap above iou_thr the
+    higher-confidence one is kept. Used to combine ROI detections with a full-frame heartbeat."""
+    out = list(primary)
+    for d in secondary:
+        dup = None
+        for i, p in enumerate(out):
+            if p.class_label == d.class_label and p.box.iou(d.box) >= iou_thr:
+                dup = i
+                break
+        if dup is None:
+            out.append(d)
+        elif d.confidence > out[dup].confidence:
+            out[dup] = d
+    return out

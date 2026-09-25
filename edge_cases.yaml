@@ -53,7 +53,7 @@ cases:
   ring: ring0
   title: Stationary object is invisible to the gate
   trigger: Person stops moving; bag placed and left; fallen person still.
-  handling: Heartbeat detections on I-frames (1–2 s active tiles, 10–30 s quiet, always on asset homes) keep tubes alive; not the gate's job.
+  handling: HeartbeatScheduler runs a full-frame detection at episode open, every 1 s on active tiles and every 10 s on quiet ones (merged with ROI detections); measured on real footage as person_tubes and lost-vs-exited in bench/slice_gpu.py --detect hybrid.
   status: implemented
 - id: E-GATE-02
   ring: ring0
@@ -77,8 +77,8 @@ cases:
   ring: ring0
   title: Very slow motion under threshold
   trigger: Someone creeping; object slid slowly.
-  handling: Heartbeat detections catch state deltas the gate misses; gate FN rate is a tracked metric.
-  status: planned
+  handling: Same HeartbeatScheduler full-frame pass catches motion below the gate threshold; gate FN rate stays a tracked metric.
+  status: implemented
 - id: E-GATE-06
   ring: ring0
   title: Motion in screens, mirrors, reflections
@@ -236,7 +236,7 @@ cases:
   ring: ring3a
   title: Everyone in frame at episode open "enters"
   trigger: First tick births every visible tube inside a zone; enter_zone fires for all of them at once.
-  handling: EventCompiler seeds zone memberships silently on its first tick; enter_zone means a boundary was crossed during the episode.
+  handling: EventCompiler seeds zone memberships silently for open_grace_ms (1.5 s) after its first tick, since the gate needs a frame to warm up; the open heartbeat makes that first tick non-empty.
   status: implemented
 - id: E-EVT-02
   ring: ring3a

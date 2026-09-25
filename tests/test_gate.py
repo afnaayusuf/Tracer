@@ -55,3 +55,16 @@ def test_stationary_object_fades_from_gate_by_design(base_frame):
     for i in range(1, 40):
         r = g.update(f, 600 + i * 100)
     assert r.blobs == []   # gate is blind to the stationary object; heartbeat detections own it
+
+
+@pytest.mark.edge("E-GATE-01")
+@pytest.mark.edge("E-GATE-05")
+def test_heartbeat_fires_at_open_then_by_tile_state():
+    from vi.gate import HeartbeatScheduler
+    hb = HeartbeatScheduler(active_ms=1000, quiet_ms=5000)
+    assert hb.due(0, tile_active=False) is True                 # episode open: always look once
+    assert hb.due(500, tile_active=True) is False
+    assert hb.due(1000, tile_active=True) is True               # active tile: every second
+    assert hb.due(1999, tile_active=True) is False
+    assert [hb.due(t, tile_active=False) for t in (2000, 4000, 6000, 7000)] == [False, False, True, False]
+    assert hb.fired == 3

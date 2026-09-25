@@ -117,8 +117,8 @@ class ByteTracker:
             if dt_s > 0:
                 tr.kf.predict(dt_s)
                 tr.tube.box = tr.kf.box
-        high = [d for d in detections if d.confidence >= self.high_thr or det_source == "heartbeat"]
-        low = [d for d in detections if self.low_thr <= d.confidence < self.high_thr and det_source != "heartbeat"]
+        high = [d for d in detections if d.confidence >= self.high_thr]
+        low = [d for d in detections if self.low_thr <= d.confidence < self.high_thr]
         ids = list(self._tracks.keys())
         tracks = [self._tracks[i] for i in ids]
 
