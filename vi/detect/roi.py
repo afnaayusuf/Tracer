@@ -67,12 +67,13 @@ def remap_detections(dets: list[Detection], roi: ROI, frame_w: int, frame_h: int
     crop may have seen whole)."""
     out = []
     rw, rh = roi.x2 - roi.x1, roi.y2 - roi.y1
+    origin = "full" if (roi.x1 == 0 and roi.y1 == 0 and roi.x2 >= frame_w and roi.y2 >= frame_h) else "roi"
     for d in dets:
         at_roi_edge = d.box.x1 <= EDGE_PX or d.box.y1 <= EDGE_PX or d.box.x2 >= rw - EDGE_PX or d.box.y2 >= rh - EDGE_PX
         b = Box(x1=d.box.x1 + roi.x1, y1=d.box.y1 + roi.y1, x2=d.box.x2 + roi.x1, y2=d.box.y2 + roi.y1)
         truncated = b.x1 <= EDGE_PX or b.y1 <= EDGE_PX or b.x2 >= frame_w - EDGE_PX or b.y2 >= frame_h - EDGE_PX
-        out.append(d.model_copy(update={"box": b, "truncated": truncated,
-                                        "roi_truncated": bool(at_roi_edge and not truncated)}))
+        out.append(d.model_copy(update={"box": b, "truncated": truncated, "origin": origin,
+                                        "roi_truncated": bool(at_roi_edge and not truncated and origin == "roi")}))
     return out
 
 

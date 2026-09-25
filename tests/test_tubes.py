@@ -112,3 +112,27 @@ def test_kalman_predicts_constant_velocity_in_seconds():
     assert abs(kf.speed_px_s - 100) < 15
     predicted = kf.predict(1.0)
     assert abs(predicted.x1 - (kf.x[0] - 20)) < 1e-6 and 150 < predicted.x1 < 260
+
+
+@pytest.mark.edge("E-GATE-01")
+def test_heartbeat_born_static_track_survives_roi_ticks_and_confirms_on_next_heartbeat():
+    """Hybrid detection: a static person is only visible to the 1 Hz full-frame heartbeat."""
+    tr = ByteTracker("c1", confirm_ticks=2, static_grace_ms=1500, max_occluded_ms=3000)
+    full = det(100, 100, 140, 220).model_copy(update={"origin": "full"})
+    live, _ = tr.update([full], 0, det_source="heartbeat")          # born from the heartbeat
+    assert live[0].state == TubeState.born
+    for t in (250, 500, 750):                                       # ROI ticks: nothing, but not deleted
+        live, _ = tr.update([], t, det_source="detector")
+        assert len(live) == 1 and live[0].state == TubeState.born
+    live, _ = tr.update([full], 1000, det_source="heartbeat")       # next heartbeat confirms it
+    assert live[0].state == TubeState.active and tr._tracks[live[0].tube_id].confirmed
+    # a crop-born unconfirmed track that misses is still deleted at once
+    roi_born = det(400, 100, 440, 220).model_copy(update={"origin": "roi"})
+    tr.update([full, roi_born], 1250)
+    live, _ = tr.update([full], 1500)
+    assert [t.tube_id for t in live] == [live[0].tube_id] and len(live) == 1
+    # and a heartbeat-born track that misses ON a heartbeat tick is gone too
+    tr2 = ByteTracker("c1", confirm_ticks=2)
+    tr2.update([full], 0, det_source="heartbeat")
+    live, _ = tr2.update([], 1000, det_source="heartbeat")
+    assert live == []

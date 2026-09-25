@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 from pydantic import BaseModel, Field
@@ -25,6 +25,7 @@ class Detection(BaseModel):
     embedding: list[float] | None = None   # R14: ReID alongside the box
     truncated: bool = False                # E-DET-02: box touches the frame border
     roi_truncated: bool = False            # E-DET-10: box touches its crop border (partial view of the object)
+    origin: Literal["roi", "full", "unknown"] = "unknown"   # which crop produced it (heartbeat = full)
 
 
 class Detector(Protocol):

@@ -23,7 +23,7 @@ try:
     from vi.detect.rfdetr import RFDETRDetector
 except ImportError:  # CPU runtime: only --model fake works
     RFDETRDetector = None  # type: ignore
-from vi.episode import EpisodeWriter, KeyframeStore
+from vi.episode import EpisodeWriter, KeyframeStore, annotate
 from vi.events import EventCompiler, default_zones, load_zones
 from vi.gate import FrameDiffGate, HeartbeatScheduler
 from vi.ingest import VideoReader
@@ -47,6 +47,7 @@ def main() -> None:
                     help="roi: motion ROIs only; frame: full frame every tick; hybrid: ROIs + full-frame heartbeat")
     ap.add_argument("--heartbeat-ms", type=int, default=1000, help="hybrid: full-frame detection period on active tiles")
     ap.add_argument("--quiet-heartbeat-ms", type=int, default=10000)
+    ap.add_argument("--debug-frames", type=int, default=0, help="save N annotated frames to data/debug/<episode>/")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--max-frames", type=int, default=600)
     ap.add_argument("--zones", default=None, help="JSON zones file; default = edge exits + centre floor")
@@ -77,6 +78,15 @@ def main() -> None:
     frames = 0
     hb = HeartbeatScheduler(active_ms=a.heartbeat_ms, quiet_ms=a.quiet_heartbeat_ms)
     heartbeats = 0
+    births_by_origin: Counter = Counter()
+    confirmed_by_origin: Counter = Counter()
+    rebirths = 0                                   # tube born next to one that just died = fragmentation, counted directly
+    recent_dead: list[tuple[int, float, float, float]] = []   # (t_ms, cx, cy, h)
+    seen_ids: set[str] = set()
+    confirmed_ids: set[str] = set()
+    origin_of: dict[str, str] = {}
+    debug_every = max(1, int(a.fps * 1.5)) if a.debug_frames else 0     # one frame every ~1.5 s until N saved
+    debug_paths: list[str] = []
     person_dets: list[int] = []
     concurrent_persons: list[int] = []
     state_ticks: Counter = Counter()
@@ -125,6 +135,30 @@ def main() -> None:
         t0 = time.perf_counter()
         before = len(tracker._tracks)
         live, closed = tracker.update(dets, fr.pts_ms, det_source=det_source)
+        # provenance + rebirth accounting (person tubes only)
+        for t in live:
+            if t.class_label != "person":
+                continue
+            if t.tube_id not in seen_ids:
+                seen_ids.add(t.tube_id)
+                origin = next((d.origin for d in dets if d.box.iou(t.box) > 0.7), "unknown")
+                births_by_origin[origin] += 1
+                origin_of[t.tube_id] = origin
+                cx, cy = (t.box.x1 + t.box.x2) / 2, (t.box.y1 + t.box.y2) / 2
+                if any(fr.pts_ms - tm <= 1500 and ((cx - x) ** 2 + (cy - y) ** 2) ** 0.5 <= hh for tm, x, y, hh in recent_dead):
+                    rebirths += 1
+            if t.state.value == "active" and t.tube_id not in confirmed_ids:
+                confirmed_ids.add(t.tube_id)
+                confirmed_by_origin[origin_of.get(t.tube_id, "unknown")] += 1
+        for t in closed:
+            if t.class_label == "person":
+                recent_dead.append((fr.pts_ms, (t.box.x1 + t.box.x2) / 2, (t.box.y1 + t.box.y2) / 2, t.box.height))
+        recent_dead = [r for r in recent_dead if fr.pts_ms - r[0] <= 1500]
+        if debug_every and frames % debug_every == 0 and len(debug_paths) < a.debug_frames:
+            p = annotate(fr.rgb, rois, dets, live, f"t={fr.pts_ms}ms {a.detect} hb={'Y' if det_source == 'heartbeat' else 'n'}",
+                         Path(a.out).parent / "debug" / ep / f"tick_{frames:04d}.jpg")
+            if p:
+                debug_paths.append(str(p))
         concurrent_persons.append(sum(1 for t in live if t.class_label == "person" and t.state.value == "active"))
         state_ticks.update(t.state.value for t in live if t.class_label == "person")
         births += max(0, len(live) + len(closed) - before) if closed else max(0, len(live) - before)
@@ -165,6 +199,9 @@ def main() -> None:
         "max_concurrent_persons": max(concurrent_persons) if concurrent_persons else 0,
         "person_visibility_duty": round(state_ticks["active"] / max(1, state_ticks["active"] + state_ticks["occluded"]), 3),
         "fragmentation_est": round(sum(1 for t in tubes if t.class_label == "person") / max(1.0, float(np.mean(person_dets))), 2) if person_dets else None,
+        "births_by_origin": dict(births_by_origin), "confirmed_by_origin": dict(confirmed_by_origin),
+        "rebirths": rebirths,
+        "debug_frames": debug_paths,
         "tubes_per_concurrent": round(sum(1 for t in tubes if t.class_label == "person") / max(1, max(concurrent_persons) if concurrent_persons else 1), 2),
         "mean_person_tube_life_s": round(float(np.mean([(t.last_seen.corrected_ms() - t.born.corrected_ms()) / 1000
                                                         for t in tubes if t.class_label == "person"] or [0])), 2),
@@ -179,7 +216,7 @@ def main() -> None:
     with (out / "slice_gpu.jsonl").open("a") as f:
         f.write(json.dumps(row) + "\n")
     print(json.dumps(row, indent=2))
-    print(f"\nepisode -> {writer.path(ep)}\nkeyframes -> {kf.root}")
+    print(f"\nepisode -> {writer.path(ep)}\nkeyframes -> {kf.root}" + (f"\ndebug frames -> {Path(a.out).parent / 'debug' / ep}" if debug_paths else ""))
 
 
 if __name__ == "__main__":

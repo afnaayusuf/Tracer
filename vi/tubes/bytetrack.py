@@ -43,13 +43,15 @@ class _Track:
     kf: KalmanBoxFilter
     last_t_ms: int
     confirmed: bool = False
+    origin: str = "unknown"     # "full": born from a heartbeat; ROI ticks cannot see it if it is static
+    born_t_ms: int = 0
 
 
 class ByteTracker:
     def __init__(self, camera_id: str, high_thr: float = 0.5, low_thr: float = 0.1,
                  match_iou: float = 0.2, low_match_iou: float = 0.4, buffer: float = 0.4,
                  max_occluded_ms: int = 3000, confirm_ticks: int = 2, ambig_margin: float = 0.1,
-                 first_tick_gate: float = 1.0,
+                 first_tick_gate: float = 1.0, static_grace_ms: int = 1500,
                  exit_boxes: list[Box] | None = None, modality: Modality = Modality.rgb,
                  offset_ms: int = 0, keyframe_sink: Callable[[str, int, Box], str] | None = None):
         self.camera_id = camera_id
@@ -60,6 +62,7 @@ class ByteTracker:
         self.confirm_ticks = confirm_ticks
         self.ambig_margin = ambig_margin
         self.first_tick_gate = first_tick_gate
+        self.static_grace_ms = static_grace_ms   # E-GATE-01: unconfirmed heartbeat-born tracks wait for the next heartbeat
         self.exit_boxes = exit_boxes or []
         self.modality = modality
         self.offset_ms = offset_ms
@@ -152,7 +155,12 @@ class ByteTracker:
         for i in ut:
             tr = tracks[i]
             if not tr.confirmed:
-                del self._tracks[tr.tube.tube_id]          # unconfirmed and gone: never a tube
+                # A heartbeat-born track missed on an ROI tick is not evidence of anything: ROIs are
+                # blind to static objects. It survives (still `born`) until the next heartbeat tick or
+                # the grace window, whichever comes first; a miss on a heartbeat tick is a real miss.
+                waiting = tr.origin == "full" and det_source != "heartbeat" and t_ms - tr.born_t_ms <= self.static_grace_ms
+                if not waiting:
+                    del self._tracks[tr.tube.tube_id]      # unconfirmed and gone: never a tube
                 continue
             tr.kf.misses += 1
             if tr.tube.occluded_since_ms is None:
@@ -169,7 +177,8 @@ class ByteTracker:
                         born=self._t(t_ms), last_seen=self._t(t_ms), box=d.box, modality=self.modality)
             if self.keyframe_sink is not None:
                 tube.keyframe_refs.append(self.keyframe_sink(self.camera_id, t_ms, d.box))
-            tr = _Track(tube=tube, kf=KalmanBoxFilter(d.box), last_t_ms=t_ms, confirmed=self.confirm_ticks <= 1)
+            tr = _Track(tube=tube, kf=KalmanBoxFilter(d.box), last_t_ms=t_ms, confirmed=self.confirm_ticks <= 1,
+                        origin=getattr(d, "origin", "unknown"), born_t_ms=t_ms)
             if tr.confirmed:
                 tube.state = TubeState.active
             self._tracks[tid] = tr
