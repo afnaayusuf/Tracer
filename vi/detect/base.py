@@ -8,6 +8,16 @@ from pydantic import BaseModel, Field
 from vi.schemas import Box
 
 
+# Classes that become tubes. Furniture, fixtures and appliances are scene-card assets handled by
+# heartbeats and zones, never tracked as moving objects (E-DET-09).
+TUBE_CLASSES = {"person", "dog", "cat", "bicycle", "car", "motorcycle", "bus", "truck",
+                "backpack", "handbag", "suitcase", "umbrella"}
+
+
+def is_tube_class(label: str) -> bool:
+    return label in TUBE_CLASSES
+
+
 class Detection(BaseModel):
     box: Box
     class_label: str

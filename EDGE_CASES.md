@@ -1,6 +1,6 @@
 # Edge-case registry
 
-Generated from `edge_cases.yaml` by `make edge-doc`. 72 cases, 31 implemented and tested.
+Generated from `edge_cases.yaml` by `make edge-doc`. 74 cases, 32 implemented and tested.
 
 Status: **implemented** = code path exists and a test marked `@pytest.mark.edge("ID")` exercises it; **planned** = month-1 scope; **deferred** = tracked, not month 1.
 
@@ -41,6 +41,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | E-DET-06 | Dense crowds | Heavy overlap; fragmentation. | crowd event on density; tube quality flag; enrichment skipped for low-quality tubes. | deferred | — |
 | E-DET-07 | Fisheye or wide-lens distortion | Homography from a distorted image. | fov_class from scene card; undistort before foot-point projection. | deferred | — |
 | E-DET-08 | IR appearance shift lowers recall | Night mode. | Measured on night eval set before any enhancer; enhancer only if gap is real and license clear. | planned | — |
+| E-DET-09 | Static furniture and fixtures become tubes | Detector emits dining table, tv, chair as objects; tracker births permanent tubes for them. | Only TUBE_CLASSES (people, animals, vehicles, carried bags) become tubes; furniture is a scene-card asset owned by zones and heartbeats. | implemented | test_eval_mot.py::test_default_zones_and_tube_classes |
 
 ## Ring 2 · tubes and fusion
 
@@ -56,6 +57,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | E-TUBE-08 | Appearance drift within a day | Jacket on/off; bag picked up. | Multiple exemplars per entity; embedding refresh on confident matches; oldest expire. | planned | — |
 | E-TUBE-09 | Carried object is not its own tube | Bag on shoulder; keys in hand. | carried_item attribute on the person tube; object tube only when placed and stationary. | planned | — |
 | E-TUBE-10 | Pets, strollers, wheelchairs | Non-person moving classes; child inside stroller. | Class-specific lifecycle; stroller+child handled as one tube with carried_item=child hint. | deferred | — |
+| E-TUBE-13 | Fragmentation at sampled frame rate | Decode at 2 fps means a walking person moves half a box width between ticks; IoU association breaks the tube. | dt-aware Kalman prediction (ByteTrack rewrite) and a lower IoU gate; measured as fragmentation_ratio and idsw in bench/ring2_tubes.py against the SimpleIoUTracker baseline. | planned | — |
 | E-TUBE-12 | Feet occluded, foot point wrong | Person behind counter. | FloorPoint.source=fallback_bbox_bottom and uncertainty widened; fusion tolerances read it. | implemented | test_tubes.py::test_occluded_feet_widen_uncertainty_and_tag_source |
 
 ## Ring 3a · event compiler

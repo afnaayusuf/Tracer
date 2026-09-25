@@ -146,6 +146,12 @@ cases:
   trigger: Night mode.
   handling: Measured on night eval set before any enhancer; enhancer only if gap is real and license clear.
   status: planned
+- id: E-DET-09
+  ring: ring1
+  title: Static furniture and fixtures become tubes
+  trigger: Detector emits dining table, tv, chair as objects; tracker births permanent tubes for them.
+  handling: Only TUBE_CLASSES (people, animals, vehicles, carried bags) become tubes; furniture is a scene-card asset owned by zones and heartbeats.
+  status: implemented
 # ---------------- ring 2 tubes / fusion ----------------
 - id: E-TUBE-01
   ring: ring2
@@ -207,6 +213,12 @@ cases:
   trigger: Non-person moving classes; child inside stroller.
   handling: Class-specific lifecycle; stroller+child handled as one tube with carried_item=child hint.
   status: deferred
+- id: E-TUBE-13
+  ring: ring2
+  title: Fragmentation at sampled frame rate
+  trigger: Decode at 2 fps means a walking person moves half a box width between ticks; IoU association breaks the tube.
+  handling: dt-aware Kalman prediction (ByteTrack rewrite) and a lower IoU gate; measured as fragmentation_ratio and idsw in bench/ring2_tubes.py against the SimpleIoUTracker baseline.
+  status: planned
 - id: E-TUBE-12
   ring: ring2
   title: Feet occluded, foot point wrong

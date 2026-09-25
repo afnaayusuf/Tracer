@@ -29,3 +29,28 @@ class Zone(BaseModel):
 
     def contains(self, pt: tuple[float, float]) -> bool:
         return point_in_polygon(pt, self.polygon)
+
+
+def default_zones(camera_id: str, width: int, height: int, edge_frac: float = 0.1,
+                  tile_id: str | None = None) -> list[Zone]:
+    """Two exit strips (left/right edges) and a centre floor zone, in native pixels. Enough
+    for the first real-footage slice; real zones come from the scene card + walk."""
+    e = width * edge_frac
+    return [
+        Zone(zone_id="exit_left", camera_id=camera_id, tile_id=tile_id, kind="exit",
+             polygon=[(0, 0), (e, 0), (e, height), (0, height)]),
+        Zone(zone_id="exit_right", camera_id=camera_id, tile_id=tile_id, kind="exit",
+             polygon=[(width - e, 0), (width, 0), (width, height), (width - e, height)]),
+        Zone(zone_id="floor_centre", camera_id=camera_id, tile_id=tile_id, kind="generic",
+             polygon=[(e, height * 0.4), (width - e, height * 0.4), (width - e, height), (e, height)]),
+    ]
+
+
+def load_zones(path: str, camera_id: str | None = None) -> list[Zone]:
+    """JSON: [{"zone_id":..., "camera_id":..., "kind":..., "polygon":[[x,y],...], "asset_id":...}, ...]"""
+    import json
+    from pathlib import Path
+
+    items = json.loads(Path(path).read_text())
+    zones = [Zone(**{**z, "polygon": [tuple(p) for p in z["polygon"]]}) for z in items]
+    return [z for z in zones if camera_id is None or z.camera_id == camera_id]
