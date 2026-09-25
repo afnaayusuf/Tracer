@@ -34,6 +34,20 @@ def crop_for_embedding(frame_rgb: np.ndarray, box: Box, pad: float = 0.08) -> np
     return np.ascontiguousarray(frame_rgb[y1:y2, x1:x2])
 
 
+def pick_features(out):
+    """transformers has returned a bare tensor, a tuple, or an output object with pooler_output /
+    image_embeds depending on version; take the pooled image embedding whichever way it arrives."""
+    for attr in ("image_embeds", "pooler_output"):
+        v = getattr(out, attr, None)
+        if v is not None:
+            return v
+    if isinstance(out, (tuple, list)):
+        return out[0]
+    if hasattr(out, "last_hidden_state"):
+        return out.last_hidden_state.mean(dim=1)
+    return out
+
+
 def _l2(x: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(x, axis=1, keepdims=True)
     return (x / np.maximum(n, 1e-8)).astype(np.float32)
@@ -79,7 +93,7 @@ class SigLIPEmbedder:
         ims = [Image.fromarray(np.ascontiguousarray(c)) for c in crops]
         with self.torch.no_grad():
             inputs = self.processor(images=ims, return_tensors="pt").to(self.device)
-            feats = self.model.get_image_features(**inputs)
+            feats = pick_features(self.model.get_image_features(**inputs))
         return _l2(feats.float().cpu().numpy())
 
 

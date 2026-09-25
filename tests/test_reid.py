@@ -71,3 +71,18 @@ def test_gallery_follows_appearance_drift():
     ev = lk.on_birth(tube("c1:6000:2", 300, t=6000), final / np.linalg.norm(final), 6000)
     assert ev is not None                        # linked to the drifted gallery, not the birth look
     assert float(base @ (final / np.linalg.norm(final))) < 0.8      # which plain birth-embedding matching would miss
+
+
+def test_pick_features_unwraps_every_transformers_return_shape():
+    from types import SimpleNamespace
+    from vi.reid import pick_features
+    t = np.ones((2, 4))
+    assert pick_features(t) is t                                                   # bare tensor
+    assert pick_features((t, "aux")) is t                                          # tuple
+    assert pick_features(SimpleNamespace(pooler_output=t, last_hidden_state=None)) is t   # output object (current)
+    assert pick_features(SimpleNamespace(image_embeds=t)) is t                     # older naming
+    class T:  # last_hidden_state only: mean-pool over tokens
+        def __init__(self, a): self.a = a
+        def mean(self, dim): return self.a.mean(axis=dim)
+    out = pick_features(SimpleNamespace(pooler_output=None, image_embeds=None, last_hidden_state=T(np.ones((2, 5, 4)))))
+    assert out.shape == (2, 4)
