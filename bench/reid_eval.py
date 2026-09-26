@@ -33,7 +33,9 @@ def load_embedders(names: list[str]) -> dict:
                 out[n] = DINOv2Embedder()
             elif n == "osnet":
                 from vi.reid.base import OSNetEmbedder
-                out[n] = OSNetEmbedder(model_name="osnet_x1_0")
+                e = OSNetEmbedder(model_name="osnet_ain_x1_0")
+                out[e.name] = e
+                n = e.name
             print(f"[reid_eval] {n}: loaded")
         except Exception as e:
             print(f"[reid_eval] {n}: unavailable ({type(e).__name__}: {str(e)[:100]})")

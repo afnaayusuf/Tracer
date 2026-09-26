@@ -30,6 +30,8 @@ class _Entity:
     aux: np.ndarray | None = None
     last_box_center: tuple[float, float] = (0.0, 0.0)
     last_box_h: float = 1.0
+    born_ms: int = 0
+    last_active_ms: int = 0
     lost_at_ms: int | None = None      # set when its tube closed (lost/exited) OR went occluded; None while seen
     closed_as_exit: bool = False
     live_tube_id: str | None = None    # an occluded-but-live tube: linking a newborn to this entity absorbs it
@@ -57,6 +59,8 @@ class TubeLinker:
         self._tube_entity: dict[str, str] = {}
         self._seq = 0
         self.relinks = 0
+        self.merges = 0
+        self.max_coexist_ms = 1000
         self.absorbed: list[str] = []      # ghost tubes the tracker should drop (read and clear each tick)
 
     # ---------------------------------------------------------------- helpers
@@ -64,7 +68,8 @@ class TubeLinker:
         self._seq += 1
         ent = _Entity(entity_id=f"{self.camera_id}:E{self._seq}", tube_ids=[tube.tube_id], ema=emb.copy(),
                       exemplars=[emb.copy()], last_box_center=_center(tube), last_box_h=tube.box.height,
-                      aux=None if aux is None else aux.copy())
+                      aux=None if aux is None else aux.copy(), born_ms=tube.born.corrected_ms(),
+                      last_active_ms=tube.last_seen.corrected_ms())
         self._entities[ent.entity_id] = ent
         self._tube_entity[tube.tube_id] = ent.entity_id
         return ent
@@ -150,18 +155,49 @@ class TubeLinker:
                 e.lost_at_ms = tube.occluded_since_ms if tube.occluded_since_ms is not None else t_ms
             e.live_tube_id = tube.tube_id
             e.last_box_center, e.last_box_h = _center(tube), tube.box.height
-        elif tube.state == TubeState.active and e.live_tube_id == tube.tube_id:
-            e.lost_at_ms, e.live_tube_id = None, None       # seen again: no longer a candidate
+        elif tube.state == TubeState.active:
+            e.last_active_ms = t_ms
+            if e.live_tube_id == tube.tube_id:
+                e.lost_at_ms, e.live_tube_id = None, None   # seen again: no longer a candidate
 
-    def on_close(self, tube: Tube, t_ms: int) -> None:
+    def on_close(self, tube: Tube, t_ms: int) -> Event | None:
+        """A tube that dies `lost` next to a live entity it overlapped with for under a second,
+        and that looks like it, was a second box on the same body: merge it (mirror of on_birth).
+        Long co-existence means two people, whatever the embeddings say."""
         eid = self._tube_entity.get(tube.tube_id)
         if eid is None:
-            return
+            return None
         e = self._entities[eid]
+        if tube.state == TubeState.lost and len(e.tube_ids) >= 1:
+            cx, cy = _center(tube)
+            best, best_sim = None, 0.0
+            for o in self._entities.values():
+                if o is e or o.lost_at_ms is not None:
+                    continue                                              # only live, currently seen entities
+                overlap = min(tube.last_seen.corrected_ms(), o.last_active_ms) - max(tube.born.corrected_ms(), o.born_ms)
+                dist = ((cx - o.last_box_center[0]) ** 2 + (cy - o.last_box_center[1]) ** 2) ** 0.5
+                if overlap > self.max_coexist_ms or dist > self.near_jump_px:
+                    continue
+                sim = self._sim(o, e.ema)
+                if sim > best_sim:
+                    best, best_sim = o, sim
+            if best is not None and best_sim >= self.near_sim_thr:
+                for tid in e.tube_ids:
+                    self._tube_entity[tid] = best.entity_id
+                best.tube_ids = sorted(set(best.tube_ids + e.tube_ids))
+                best.exemplars = (best.exemplars + e.exemplars)[-self.n_exemplars:]
+                del self._entities[eid]
+                self.merges += 1
+                return Event(event_id="ev_" + hashlib.sha1(f"merge|{eid}|{best.entity_id}".encode()).hexdigest()[:16],
+                             type=EventType.relink, t=CamTime(cam_utc_ms=t_ms), camera_id=self.camera_id,
+                             subject_tube_ids=[tube.tube_id, best.tube_ids[-1]], subject_entity_ids=[best.entity_id],
+                             payload={"similarity": round(best_sim, 3), "kind": "merge_on_death", "merged_entity": eid},
+                             confidence=min(1.0, best_sim))
         e.last_box_center, e.last_box_h = _center(tube), tube.box.height
         e.lost_at_ms = t_ms if tube.state in (TubeState.lost, TubeState.occluded, TubeState.exited) else None
         e.closed_as_exit = tube.state == TubeState.exited
         e.live_tube_id = None
+        return None
 
     def entity_of(self, tube_id: str) -> str | None:
         return self._tube_entity.get(tube_id)

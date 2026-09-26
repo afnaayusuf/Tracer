@@ -97,18 +97,52 @@ class SigLIPEmbedder:
         return _l2(feats.float().cpu().numpy())
 
 
+OSNET_REID_WEIGHTS = {   # torchreid model zoo (docs/MODEL_ZOO.md), MSMT17 combineall=True, cross-domain rows
+    "osnet_ain_x1_0": ("1SigwBE6mPdqiJMqhuIY4aqC7--5CsMal", "osnet_ain_x1_0_msmt17.pth"),
+    "osnet_x1_0": ("1IosIFlLiulGIjwW3H8uMRmx3MzPwf86x", "osnet_x1_0_msmt17.pth"),
+}
+
+
+def osnet_reid_weights(model_name: str = "osnet_ain_x1_0", cache_dir: str | None = None) -> str | None:
+    """Download the ReID-trained checkpoint once (gdown, Google Drive); return its path or None."""
+    import os
+    from pathlib import Path
+    if model_name not in OSNET_REID_WEIGHTS:
+        return None
+    file_id, fname = OSNET_REID_WEIGHTS[model_name]
+    cache = Path(cache_dir or os.environ.get("VI_WEIGHTS", Path.home() / ".cache" / "vi-weights"))
+    cache.mkdir(parents=True, exist_ok=True)
+    path = cache / fname
+    if path.exists() and path.stat().st_size > 1_000_000:
+        return str(path)
+    try:
+        import gdown
+        gdown.download(id=file_id, output=str(path), quiet=True)
+    except Exception as e:  # pragma: no cover
+        print(f"[reid] osnet weights download failed ({type(e).__name__}: {str(e)[:80]})")
+        return None
+    return str(path) if path.exists() and path.stat().st_size > 1_000_000 else None
+
+
 class OSNetEmbedder:
+    """torchreid OSNet (MIT). With the ReID-trained MSMT17 checkpoint this is the purpose-built
+    person embedder; without it (ImageNet weights) it is no better than a generic model."""
+
     name = "osnet"
     dim = 512
 
-    def __init__(self, model_name: str = "osnet_x0_25", model_path: str | None = None, device: str | None = None):
+    def __init__(self, model_name: str = "osnet_ain_x1_0", model_path: str | None = "auto", device: str | None = None):
         import torch
         try:
             from torchreid.utils import FeatureExtractor
         except ImportError:
             from torchreid.reid.utils import FeatureExtractor      # PyPI package layout
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.extractor = FeatureExtractor(model_name=model_name, model_path=model_path, device=self.device)
+        if model_path == "auto":
+            model_path = osnet_reid_weights(model_name)
+        self.reid_trained = bool(model_path)
+        self.name = "osnet_reid" if self.reid_trained else "osnet_imagenet"
+        self.extractor = FeatureExtractor(model_name=model_name, model_path=model_path or "", device=self.device)
 
     def embed(self, crops: list[np.ndarray]) -> np.ndarray:
         if not crops:

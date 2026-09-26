@@ -221,7 +221,10 @@ def main() -> None:
                 if t.class_label == "person":
                     t.entity_id = linker.entity_of(t.tube_id)
             for t in closed:
-                linker.on_close(t, fr.pts_ms)
+                mev = linker.on_close(t, fr.pts_ms)
+                if mev is not None:
+                    events.append(mev)
+                    print(f"t={fr.pts_ms:7d}  merge                  {mev.payload['merged_entity']} -> {mev.subject_entity_ids[0]} sim={mev.payload['similarity']}")
         persons = [t for t in live if t.class_label == "person" and t.state.value in ("active", "born")]
         for i in range(len(persons)):
             for j in range(i + 1, len(persons)):
@@ -274,6 +277,10 @@ def main() -> None:
     if frames == 0:
         raise SystemExit("no frames read; check --source")
     tubes = [tr.tube for tr in tracker._tracks.values()] + closed_all
+    if linker is not None:
+        for t in tubes:
+            if t.class_label == "person":
+                t.entity_id = linker.entity_of(t.tube_id) or t.entity_id
     cast = [CastMember(tube_ids=[t.tube_id], class_label=t.class_label, best_keyframe_ref=(t.keyframe_refs or [None])[0])
             for t in tubes]
     for t in tubes:
@@ -297,6 +304,7 @@ def main() -> None:
         "fragmentation_est": round(sum(1 for t in tubes if t.class_label == "person") / max(1.0, float(np.mean(person_dets))), 2) if person_dets else None,
         "reid": embedder.name if embedder else "none",
         "entities": linker.entities if linker else None, "relinks": linker.relinks if linker else None,
+        "merges_on_death": linker.merges if linker else None,
         "ghosts_absorbed": absorbed_total if linker else None,
         "entities_per_concurrent": round(linker.entities / max(1, max(concurrent_persons) if concurrent_persons else 1), 2) if linker else None,
         "embed_ms_p50": round(float(np.median(embed_ms)), 2) if embed_ms else None,

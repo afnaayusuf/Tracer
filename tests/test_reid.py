@@ -148,3 +148,27 @@ def test_tracker_drop_returns_a_dead_tube():
     live, _ = tr.update([Detection(box=Box(x1=0, y1=0, x2=40, y2=120), class_label="person", confidence=0.9)], 0)
     dead = tr.drop(live[0].tube_id)
     assert dead is not None and dead.state == TubeState.dead and tr.drop("nope") is None and tr._tracks == {}
+
+
+@pytest.mark.edge("E-TUBE-04")
+def test_dying_duplicate_merges_into_the_live_lookalike_but_long_coexistence_does_not():
+    a = unit(1)
+    lk = TubeLinker("c1", sim_thr=0.88, near_sim_thr=0.85)
+    t1 = tube("c1:0:1", 700); lk.on_birth(t1, a, 0)                       # the person
+    for t in (250, 500, 750, 1000, 1250):
+        t1.state = TubeState.active; t1.last_seen = CamTime(cam_utc_ms=t); lk.on_state(t1, t)
+    t2 = tube("c1:1000:2", 720, t=1000)                                     # a second box on the same body
+    lk.on_birth(t2, a, 1000)                                                # t1 is active: no candidate -> new entity
+    assert lk.entities == 2
+    t2.state = TubeState.lost; t2.last_seen = CamTime(cam_utc_ms=1500)      # dies after 0.5 s of overlap
+    ev = lk.on_close(t2, 1500)
+    assert ev is not None and ev.payload["kind"] == "merge_on_death" and lk.entities == 1 and lk.merges == 1
+    assert lk.entity_of("c1:1000:2") == lk.entity_of("c1:0:1")
+    # two people who co-existed for 8 s are not merged however alike they look
+    lk2 = TubeLinker("c1", near_sim_thr=0.85)
+    p1 = tube("c1:0:1", 700); lk2.on_birth(p1, a, 0)
+    p2 = tube("c1:0:2", 760); lk2.on_birth(p2, a, 0)
+    for t in range(250, 8001, 250):
+        p1.last_seen = CamTime(cam_utc_ms=t); p1.state = TubeState.active; lk2.on_state(p1, t)
+    p2.state = TubeState.lost; p2.last_seen = CamTime(cam_utc_ms=8000)
+    assert lk2.on_close(p2, 8000) is None and lk2.entities == 2
