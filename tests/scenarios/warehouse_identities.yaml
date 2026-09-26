@@ -1,0 +1,28 @@
+# Who each person tube is, read off the cast sheet (birth crops) and the clip. Keyed by birth time
+# and the birth crop's top-left corner (stable across runs; tube ids are not once births change).
+# sure: I can identify the person from the crop. unsure tubes are excluded from threshold selection.
+clip: HI_DEF_VIDEO.mp4
+people:
+  P1: near-left of table, orange vest, black hair, facing table
+  P2: near-left of table, dark jacket + orange vest, back to camera
+  P3: far-left end of table, woman, orange vest over dark top
+  P4: far side of table, white hard hat, orange vest, blue jeans
+  P5: right of table at 0 s, pink/dark cap, orange vest, holding a bundle
+  P6: conveyor, yellow-green hi-vis + white hard hat, present the whole clip
+  P7: conveyor, yellow-green hi-vis, dark cap
+  P8: dock aisle top-right, dark jacket + orange vest, walking with boxes
+tubes:
+  - {born_ms: 0,     x: 505,  y: 290, person: P1, sure: true}
+  - {born_ms: 0,     x: 472,  y: 293, person: P2, sure: true}
+  - {born_ms: 0,     x: 599,  y: 191, person: P3, sure: true}
+  - {born_ms: 0,     x: 661,  y: 184, person: P4, sure: true}
+  - {born_ms: 3667,  x: 712,  y: 207, person: P4, sure: true}
+  - {born_ms: 5000,  x: 738,  y: 203, person: P4, sure: true}
+  - {born_ms: 0,     x: 812,  y: 253, person: P5, sure: true}
+  - {born_ms: 7000,  x: 1213, y: 246, person: P6, sure: true}
+  - {born_ms: 4000,  x: 1215, y: 240, person: P7, sure: true}
+  - {born_ms: 12667, x: 1215, y: 240, person: P8, sure: false}   # orange vest at the frame border; linked to P7 by SigLIP (wrong)
+  - {born_ms: 3000,  x: 613,  y: 131, person: P3, sure: false}   # looks like the woman at the far end again
+  - {born_ms: 4000,  x: 642,  y: 198, person: P5, sure: false}   # pink cap after moving to the far-middle
+  - {born_ms: 5333,  x: 1183, y: 224, person: P7, sure: false}
+  - {born_ms: 6000,  x: 1159, y: 204, person: P7, sure: false}
