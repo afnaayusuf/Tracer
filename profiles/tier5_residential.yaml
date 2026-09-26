@@ -1,0 +1,6 @@
+name: tier5_residential
+extends: common
+tube_classes: [person, dog, cat, backpack, handbag, suitcase, bicycle]
+branches: [roles, custody]
+events: [pickup, drop, left_behind, asset_missing_from_home, doorbell, fall]
+zone_kinds: [doorstep, hallway, kitchen, entry_shelf, exit, media]

@@ -78,6 +78,63 @@ def search_entities(engine: Engine, *, camera_id: str | None = None, class_label
         return [dict(r._mapping) for r in conn.execute(q.order_by(entities.c.first_seen_ms).limit(limit))]
 
 
+def episode_window(engine: Engine, episode_id: str) -> tuple[int, int]:
+    with engine.connect() as conn:
+        row = conn.execute(select(episodes.c.t0_ms, episodes.c.t1_ms).where(episodes.c.episode_id == episode_id)).first()
+    if row is None:
+        raise KeyError(episode_id)
+    return int(row[0]), int(row[1] if row[1] is not None else row[0])
+
+
+def coverage(engine: Engine, episode_id: str, class_label: str = "person", confirmed_only: bool = True) -> list[dict]:
+    """Per entity: seen interval, coverage of the episode window (0-1), tube count, quality.
+    Deterministic; this is what the agent must use for 'how long', 'whole time', 'how many'."""
+    t0, t1 = episode_window(engine, episode_id)
+    span = max(1, t1 - t0)
+    with engine.connect() as conn:
+        rows = [dict(r._mapping) for r in conn.execute(select(tubes).where(and_(tubes.c.episode_id == episode_id, tubes.c.class_label == class_label)))]
+    by: dict[str, list[dict]] = {}
+    for r in rows:
+        by.setdefault(r["entity_id"], []).append(r)
+    out = []
+    for eid, rs in by.items():
+        ok = any(r.get("quality", "ok") == "ok" for r in rs)
+        if confirmed_only and not ok:
+            continue
+        # union of tube intervals (clipped to the window)
+        ivs = sorted((max(t0, r["born_ms"]), min(t1, r["last_seen_ms"])) for r in rs)
+        covered, cur = 0, None
+        for a, b in ivs:
+            if cur is None or a > cur[1]:
+                if cur: covered += cur[1] - cur[0]
+                cur = [a, b]
+            else:
+                cur[1] = max(cur[1], b)
+        if cur: covered += cur[1] - cur[0]
+        out.append({"entity_id": eid, "first_seen_ms": min(r["born_ms"] for r in rs), "last_seen_ms": max(r["last_seen_ms"] for r in rs),
+                    "coverage": round(covered / span, 3), "tubes": len(rs), "quality": "ok" if ok else "low"})
+    return sorted(out, key=lambda x: (-x["coverage"], x["first_seen_ms"]))
+
+
+def count_entities(engine: Engine, episode_id: str, t_start_ms: int | None = None, t_end_ms: int | None = None,
+                   class_label: str = "person", confirmed_only: bool = True) -> dict:
+    """Distinct confirmed entities present in [t_start, t_end] (default: the whole episode)."""
+    t0, t1 = episode_window(engine, episode_id)
+    a, b = (t0 if t_start_ms is None else t_start_ms), (t1 if t_end_ms is None else t_end_ms)
+    rows = coverage(engine, episode_id, class_label, confirmed_only)
+    present = [r["entity_id"] for r in rows if r["last_seen_ms"] >= a and r["first_seen_ms"] <= b]
+    return {"count": len(present), "entity_ids": present, "window_ms": [a, b], "confirmed_only": confirmed_only}
+
+
+def entities_present(engine: Engine, episode_id: str, min_coverage: float = 0.9, class_label: str = "person") -> dict:
+    """Entities seen for at least min_coverage of the episode: the deterministic answer to
+    'who stayed the whole time' (0.9 tolerates short occlusions)."""
+    rows = coverage(engine, episode_id, class_label)
+    ids = [r["entity_id"] for r in rows if r["coverage"] >= min_coverage]
+    return {"min_coverage": min_coverage, "count": len(ids), "entity_ids": ids,
+            "coverage": {r["entity_id"]: r["coverage"] for r in rows}}
+
+
 def _tubes_of_entity(engine: Engine, entity_id: str) -> list[str]:
     with engine.connect() as conn:
         row = conn.execute(select(entities.c.tube_ids).where(entities.c.entity_id == entity_id)).first()
@@ -131,9 +188,21 @@ def get_script(engine: Engine, episode_id: str, max_events: int = 400, cache: bo
                     f"carrying {attrs['carried_item']}" if attrs.get("carried_item") else ""]
             desc = "  looks: " + "; ".join(b for b in bits if b)
         return (f"  {eid}  {rows[0]['class_label']}  {name}  tubes {','.join(r['tube_id'] for r in rows)}  "
-                f"seen {_ts(first, t0)}–{_ts(last, t0)}  states {','.join(sorted({r['state'] for r in rows}))}"
+                f"seen {_ts(first, t0)}–{_ts(last, t0)}  coverage {cov(rows):.0%}  states {','.join(sorted({r['state'] for r in rows}))}"
                 + (f"  keyframe {kf}" if kf else "") + desc)
 
+    span = max(1, (ep["t1_ms"] or t0) - t0)
+    def cov(rows: list[dict]) -> float:
+        ivs = sorted((max(t0, r["born_ms"]), min(ep["t1_ms"] or t0, r["last_seen_ms"])) for r in rows)
+        total, cur = 0, None
+        for a, b in ivs:
+            if cur is None or a > cur[1]:
+                if cur: total += cur[1] - cur[0]
+                cur = [a, b]
+            else:
+                cur[1] = max(cur[1], b)
+        if cur: total += cur[1] - cur[0]
+        return total / span
     confirmed = {e: rows for e, rows in by_entity.items() if any(r.get("quality", "ok") == "ok" for r in rows)}
     brief = {e: rows for e, rows in by_entity.items() if e not in confirmed}
     people = sum(1 for rows in confirmed.values() if rows[0]["class_label"] == "person")

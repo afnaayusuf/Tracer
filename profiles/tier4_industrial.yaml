@@ -1,0 +1,7 @@
+name: tier4_industrial
+extends: common
+tube_classes: [person, forklift, truck, car, suitcase, backpack]
+branches: [pose, actions, ppe]
+events: [fall, run, proximity, restricted_zone]
+zone_kinds: [packing_table, conveyor, dock_aisle, dock_doors, coat_rack, restricted, media, exit]
+notes: The warehouse clip is a tier-4 scene; data/zones/HI_DEF_VIDEO.json uses these zone kinds.

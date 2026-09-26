@@ -1,0 +1,10 @@
+name: tier1_hospital
+extends: common
+tube_classes: [person, wheelchair, bed, chair]
+branches: [pose, actions, ppe, roles]
+events: [fall, lying, wandering, crowd, loiter]
+zone_kinds: [bed, corridor, dispenser, triage, exit]
+roles: [staff, patient, visitor]
+notes: |
+  Gait metrics (cadence, step length, symmetry) are rules over RTMPose keypoints and are flags, not
+  clinical findings, until validated on that site. Face branch off unless the site opts in.

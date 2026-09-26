@@ -1,0 +1,18 @@
+# Branches every tier runs. A tier profile extends this; the generator only runs branches that are
+# both listed here-or-in-the-tier and marked available in the registry for this runtime.
+name: common
+tube_classes: [person, dog, cat, bicycle, car, motorcycle, bus, truck, backpack, handbag, suitcase, umbrella]
+branches:
+  - detect            # RF-DETR nano, per sampled frame
+  - track             # ByteTracker, per frame
+  - relink            # SigLIP appearance, tube events
+  - writer            # contact-sheet VLM: clothing, carried items, role; tube events
+events: [enter_zone, exit_zone, dwell, approach, meet, pickup, drop, left_behind, asset_missing_from_home,
+         handoff, impossible_transition, illumination_change, door_state_change, modality_switch,
+         signal_lost, signal_restored, camera_moved_suspect, relink]
+zone_kinds: [generic, exit, asset_home, media, actuator]
+sampling: {active_fps: 4, quiet_fps: 1}
+quality:                     # scene units, not pixels (E-DET-01): fractions of this camera's median person height
+  min_life_s: 1.5
+  min_height_frac: 0.4
+  border_px: 8

@@ -1,0 +1,5 @@
+name: tier3_office
+extends: common
+branches: [roles]
+events: [tailgate, after_hours, occupancy]
+zone_kinds: [door, desk, meeting_room, exit]

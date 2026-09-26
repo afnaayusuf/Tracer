@@ -30,6 +30,7 @@ from vi.ingest import VideoReader
 from vi.schemas import CamTime, Provenance, Tick, TubeSnapshot
 from vi.schemas.episode import CastMember, EpisodeStatus
 from vi.reid import HistogramEmbedder, crop_for_embedding, make_embedder
+from vi.profiles import load_profile
 from vi.tubes import TRACKERS, TubeLinker, grade_tube
 
 
@@ -55,15 +56,23 @@ def main() -> None:
     ap.add_argument("--reid-every-ticks", type=int, default=8, help="gallery refresh cadence for active tubes")
     ap.add_argument("--reid-sim", type=float, default=0.88, help="from bench/reid_eval.py (SigLIP on the warehouse clip)")
     ap.add_argument("--reid-near-sim", type=float, default=0.85)
+    ap.add_argument("--profile", default="common", help="build-frame profile (profiles/<name>.yaml): classes, branches, quality")
+    ap.add_argument("--writer", choices=["none", "qwen", "fake"], default="none", help="contact-sheet attributes at tube confirmation")
+    ap.add_argument("--writer-model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--writer-batch", type=int, default=8, help="crops per sheet")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--max-frames", type=int, default=600)
     ap.add_argument("--zones", default=None, help="JSON zones file; default: data/zones/<clip stem>.json if present, else edge exits + centre floor")
     ap.add_argument("--iou-thr", type=float, default=0.2, help="tracker IoU at sampled fps")
     ap.add_argument("--max-occluded-ms", type=int, default=2500)
     ap.add_argument("--out", default="data/episodes")
+    ap.add_argument("--skip-s", type=float, default=0.0, help="ignore the first N seconds (metamorphic time shift)")
     a = ap.parse_args()
 
     prov = Provenance(kb_version=1, pipeline_git="slice_gpu")
+    profile = load_profile(a.profile)
+    tube_classes = set(profile.tube_classes)
+    print(f"profile: {profile.name} branches={profile.branches}")
     reader = VideoReader(a.camera, a.source, target_fps=a.fps, max_width=640, want_rgb=True)
     batch = 1 if a.detect == "frame" else a.batch          # frame mode: one image per tick, trace at 1
     if a.model == "fake":
@@ -95,6 +104,26 @@ def main() -> None:
     debug_every = max(1, int(a.fps * 1.5)) if a.debug_frames else 0     # one frame every ~1.5 s until N saved
     duplicate_pairs: list[dict] = []                # two live person tubes on one body: the hybrid bug, caught in the act
     dup_frames: list[str] = []
+    vlm_writer = None
+    if a.writer == "qwen":
+        try:
+            from vi.writer import WriterVLM
+            vlm_writer = WriterVLM(model_id=a.writer_model)
+            print(f"[writer] {a.writer_model} loaded")
+        except Exception as e:
+            print(f"[writer] unavailable ({type(e).__name__}: {str(e)[:100]}); continuing without attributes")
+    elif a.writer == "fake":
+        from vi.writer.contact_sheet import parse_sheet_reply
+        class _Fake:
+            calls = 0; last_ms = 0.0
+            def describe(self, crops, tube_ids, modality=None):
+                self.calls += 1
+                import json
+                return parse_sheet_reply(json.dumps([{"cell_id": i, "top_color": "orange", "description": "worker in a vest", "confidence": 0.7}
+                                                     for i in range(len(tube_ids))]), tube_ids)
+        vlm_writer = _Fake()
+    described: set[str] = set()
+    writer_ms: list[float] = []
     embedder = make_embedder(a.reid) if a.reid != "none" else None
     aux_embedder = HistogramEmbedder() if embedder and embedder.name != "hist" else None
     linker = TubeLinker(a.camera, sim_thr=a.reid_sim, near_sim_thr=a.reid_near_sim) if embedder else None
@@ -112,6 +141,8 @@ def main() -> None:
     for fr in reader.frames():
         if frames >= a.max_frames:
             break
+        if a.skip_s and fr.pts_ms < a.skip_s * 1000:
+            continue
         h, w = fr.rgb.shape[:2]
         current["frame"] = fr.rgb
         if zones is None:   # first frame: zones need the native size
@@ -147,7 +178,7 @@ def main() -> None:
             crops, real = pad_batch([crop_roi(fr.rgb, r) for r in chunk], batch)
             for r, d in zip(chunk, det.detect_batch(crops)[:real]):
                 dets += remap_detections(d, r, w, h)
-        dets = dedupe_detections([d for d in dets if is_tube_class(d.class_label)])   # E-DET-10
+        dets = dedupe_detections([d for d in dets if d.class_label in tube_classes])  # E-DET-10, classes from the profile
         if media_zones:   # E-DET-05: jackets on a rack, posters, screens are not people
             dets = [d for d in dets if not any(z.contains(d.box.foot_point()) for z in media_zones)]
         person_dets.append(sum(1 for d in dets if d.class_label == "person" and d.confidence >= 0.5))
@@ -225,6 +256,20 @@ def main() -> None:
                 if mev is not None:
                     events.append(mev)
                     print(f"t={fr.pts_ms:7d}  merge                  {mev.payload['merged_entity']} -> {mev.subject_entity_ids[0]} sim={mev.payload['similarity']}")
+        if vlm_writer is not None and frames % 4 == 0:  # tube-event cadence: newly confirmed people, at most every 4 ticks
+            todo = [t for t in live if t.class_label == "person" and t.state.value == "active" and t.tube_id not in described][: a.writer_batch]
+            if todo:
+                res = vlm_writer.describe([crop_for_embedding(fr.rgb, t.box, pad=0.15) for t in todo], [t.tube_id for t in todo])
+                writer_ms.append(getattr(vlm_writer, "last_ms", 0.0))
+                if res is not None:
+                    by_tube = {c.tube_id: c.attributes for c in res.cells}
+                    for t in todo:
+                        if t.tube_id in by_tube and by_tube[t.tube_id].confidence > 0:
+                            t.attributes = by_tube[t.tube_id]
+                            print(f"t={fr.pts_ms:7d}  describe               {t.tube_id}: {t.attributes.description}"
+                                  + (f" | top {t.attributes.top_color.value}" if t.attributes.top_color else ""))
+                for t in todo:
+                    described.add(t.tube_id)
         persons = [t for t in live if t.class_label == "person" and t.state.value in ("active", "born")]
         for i in range(len(persons)):
             for j in range(i + 1, len(persons)):
@@ -283,8 +328,11 @@ def main() -> None:
                 t.entity_id = linker.entity_of(t.tube_id) or t.entity_id
     cast = [CastMember(tube_ids=[t.tube_id], class_label=t.class_label, best_keyframe_ref=(t.keyframe_refs or [None])[0])
             for t in tubes]
+    heights = sorted(t.max_height_px for t in tubes if t.class_label == "person" and t.max_height_px > 0)
+    median_h = heights[len(heights) // 2] if heights else None
     for t in tubes:
-        grade_tube(t, w, h)
+        grade_tube(t, w, h, median_height_px=median_h, min_life_ms=int(profile.quality.min_life_s * 1000),
+                   min_height_frac=profile.quality.min_height_frac, border_px=profile.quality.border_px)
         writer.write_tube(ep, t)
     writer.close(ep, CamTime(cam_utc_ms=fr.pts_ms + tick_ms), EpisodeStatus.closed, cast)
     st = reader.stats
@@ -303,6 +351,10 @@ def main() -> None:
         "person_visibility_duty": round(state_ticks["active"] / max(1, state_ticks["active"] + state_ticks["occluded"]), 3),
         "fragmentation_est": round(sum(1 for t in tubes if t.class_label == "person") / max(1.0, float(np.mean(person_dets))), 2) if person_dets else None,
         "reid": embedder.name if embedder else "none",
+        "profile": profile.name, "median_person_height_px": median_h,
+        "writer": a.writer, "writer_calls": getattr(vlm_writer, "calls", 0) if vlm_writer else 0,
+        "writer_ms_p50": round(float(np.median(writer_ms)), 1) if writer_ms else None,
+        "tubes_described": sum(1 for t in tubes if t.attributes is not None),
         "entities": linker.entities if linker else None, "relinks": linker.relinks if linker else None,
         "merges_on_death": linker.merges if linker else None,
         "ghosts_absorbed": absorbed_total if linker else None,

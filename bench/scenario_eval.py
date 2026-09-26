@@ -34,10 +34,17 @@ def _mentioned(rule, text: str) -> bool:
     return _one(rule, text)
 
 
-def score(res: dict, spec: dict, budget_ms: int) -> dict:
+def score(res: dict, spec: dict, budget_ms: int, engine=None, episode_id: str | None = None) -> dict:
     f = res["final"]
     text = ID_RE.sub(" ", f.get("text") or f.get("question") or "").lower()    # ids are not numbers
+    whole_ok = True
+    if spec.get("whole_time_recall") and engine is not None and episode_id:
+        from vi.agent import entities_present
+        truth = set(entities_present(engine, episode_id, 0.9)["entity_ids"])
+        cited = {c for c in f.get("citations", []) if ":E" in c}
+        whole_ok = (len(cited & truth) / len(truth) >= spec["whole_time_recall"]) if truth else True
     checks = {
+        "whole_time": whole_ok,
         "answered": f["action"] == "answer",
         "mentions": all(_mentioned(m, text) for m in spec.get("must_mention", []) or []),
         "avoids": not any(_one(m, text) for m in spec.get("must_not_mention", []) or []),
@@ -64,7 +71,7 @@ def main() -> None:
     backend = {"fake": lambda: FakeBackend(), "openai": lambda: OpenAIBackend(base_url=a.base_url, model=a.model),
                "transformers": lambda: TransformersBackend(model_id=a.model)}[a.backend]()
     budget = int(spec.get("latency_budget_ms", 10000))
-    results = [score(ask(engine, q["q"], ep, backend), q, budget) for q in spec["questions"]]
+    results = [score(ask(engine, q["q"], ep, backend), q, budget, engine, ep) for q in spec["questions"]]
     unscored = spec.get("ground_truth", {}).get("people_total") is None
     row = {"ring": "scenario", "scenario": Path(a.scenario).name, "episode_id": ep, "backend": a.backend, "model": a.model,
            "passed": sum(r["pass"] for r in results), "total": len(results), "ground_truth_filled": not unscored,

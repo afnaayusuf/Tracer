@@ -102,6 +102,8 @@ class EventCompiler:
         for snap in tubes:
             foot = snap.box.foot_point()
             for z in self.zones.values():
+                if z.kind == "media":
+                    continue                    # E-DET-05: props and screens are not places anyone enters
                 key = (snap.tube_id, z.zone_id)
                 m = self._mem.setdefault(key, _Membership())
                 inside = z.contains(foot)

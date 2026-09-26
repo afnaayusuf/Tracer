@@ -29,12 +29,15 @@ TOOL_SPECS = {
     "search_entities": "Entities (people/objects across tubes). args: camera_id, class_label, t_start_ms, t_end_ms, named, limit",
     "get_script": "The scene script of an episode (cast + timeline). args: episode_id",
     "clip": "Evidence references (keyframes, time segments) for an entity or tube. args: entity_id or tube_id",
+    "count_entities": "Distinct confirmed people in a window. args: t_start_ms, t_end_ms (omit for whole episode)",
+    "entities_present": "Entities seen for at least min_coverage of the episode ('stayed the whole time'). args: min_coverage (default 0.9)",
+    "coverage": "Per-entity seen interval and coverage fraction. args: none",
 }
 
 
 class ToolStep(BaseModel):
     action: Literal["tool"] = "tool"
-    tool: Literal["search_events", "search_tubes", "search_entities", "get_script", "clip"]
+    tool: Literal["search_events", "search_tubes", "search_entities", "get_script", "clip", "count_entities", "entities_present", "coverage"]
     args: dict[str, Any] = Field(default_factory=dict)
     why: str = Field("", max_length=400)
 
@@ -65,7 +68,8 @@ Rules: (1) the episode's scene script is given to you; call tools only when it d
 (3) if nothing matches, say so and suggest how to widen the search; never invent people, times or events;
 (4) if the question is ambiguous (which person, which time), ask one clarifying question;
 (5) answer over entities, not tubes; a person may have several tubes; (6) times are episode-relative
-mm:ss.s in scripts and absolute milliseconds in tool args. Respond with exactly one JSON object per turn:
+mm:ss.s in scripts and absolute milliseconds in tool args; (7) any count, duration or "whole time" claim MUST come from
+count_entities / entities_present / coverage, never from reading the script. Respond with exactly one JSON object per turn:
 {"action":"tool","tool":...,"args":{...},"why":...} | {"action":"answer","text":...,"citations":[...],"confidence":...}
 | {"action":"clarify","question":...}. Count people from CONFIRMED entities; BRIEF SIGHTINGS are not people.
 Keep answers under 60 words and cite at most 8 ids; cite entity ids (cam1:E7), not tube ids, unless asked about tubes; mention only events
@@ -277,6 +281,41 @@ def contradicted_event_claims(engine: Engine, episode_id: str, text: str) -> lis
     return sorted(et for et in named if et not in have)
 
 
+WHOLE_TIME_RE = re.compile(r"whole (time|episode|clip)|entire (time|episode|clip)|throughout", re.I)
+COUNT_Q_RE = re.compile(r"how many|number of (people|persons|workers)|count", re.I)
+NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+             "eleven": 11, "twelve": 12}
+
+
+def _numbers_in(text: str) -> list[int]:
+    t = ID_RE.sub(" ", text)
+    t = re.sub(r"\d{2}:\d{2}(\.\d)?", " ", t)                        # timestamps are not counts
+    nums = [int(m) for m in re.findall(r"(?<![\d.:])(\d{1,3})(?![\d.:])", t)]
+    nums += [v for w, v in NUM_WORDS.items() if re.search(rf"\b{w}\b", t, re.I)]
+    return nums
+
+
+def numeric_claim_issue(engine: Engine, episode_id: str, question: str, step: AnswerStep) -> dict | None:
+    """E-AGT-06 for numbers: a people count or a 'stayed the whole time' list in the answer is
+    compared with the deterministic tools; a disagreement is sent back once with the true values."""
+    try:
+        if COUNT_Q_RE.search(question):
+            truth = T.count_entities(engine, episode_id)["count"]
+            nums = _numbers_in(step.text)
+            if nums and truth not in nums and all(abs(n - truth) > 1 for n in nums[:3]):
+                return {"msg": f"count_entities says {truth} confirmed people in this episode (your answer implies {nums[:3]})."}
+        if WHOLE_TIME_RE.search(question):
+            ep = T.entities_present(engine, episode_id, 0.9)
+            truth_ids = set(ep["entity_ids"])
+            cited = {c for c in step.citations if re.search(r":E\d+$", c)}
+            if truth_ids and len(cited & truth_ids) < max(1, len(truth_ids) - 1):
+                return {"msg": f"entities_present(min_coverage=0.9) says {len(truth_ids)} entities stayed the whole time: "
+                               f"{sorted(truth_ids)}; your answer names {sorted(cited & truth_ids) or 'none of them'}."}
+    except Exception:
+        return None
+    return None
+
+
 def _salvage(raw: str) -> AnswerStep | ClarifyStep | None:
     """Accept an answer that only failed on length or a missing optional field; never a tool
     call, which must be exact. Retrying seven times to trim a paragraph is not a behaviour."""
@@ -299,9 +338,13 @@ def _salvage(raw: str) -> AnswerStep | ClarifyStep | None:
     return None
 
 
-def run_tool(engine: Engine, step: ToolStep) -> Any:
+EPISODE_TOOLS = {"count_entities", "entities_present", "coverage"}
+
+
+def run_tool(engine: Engine, step: ToolStep, episode_id: str | None = None) -> Any:
     fn = {"search_events": T.search_events, "search_tubes": T.search_tubes, "search_entities": T.search_entities,
-          "get_script": T.get_script, "clip": T.clip}[step.tool]
+          "get_script": T.get_script, "clip": T.clip, "count_entities": T.count_entities,
+          "entities_present": T.entities_present, "coverage": T.coverage}[step.tool]
     import inspect
     allowed = set(inspect.signature(fn).parameters) - {"engine", "episode_id"} if step.tool != "get_script" else {"episode_id"}
     dropped = [k for k in step.args if k not in allowed]
@@ -313,6 +356,11 @@ def run_tool(engine: Engine, step: ToolStep) -> Any:
             raise ValueError(f"unknown event_type {bad}; valid: {', '.join(EVENT_TYPES)}")
     if step.tool == "get_script":
         return fn(engine, args.get("episode_id", ""))
+    if step.tool in EPISODE_TOOLS:
+        result = fn(engine, episode_id or step.args.get("episode_id", ""), **args)
+        if dropped:
+            result = {**result, "note": f"ignored unknown args {dropped}"}
+        return result
     result = fn(engine, **args)
     if dropped and isinstance(result, list):
         result = [{"note": f"ignored unknown args {dropped}"}] + result if result else [{"note": f"ignored unknown args {dropped}; no matches"}]
@@ -362,7 +410,7 @@ def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int 
             result: Any = None
             t0 = time.perf_counter()
             try:
-                result = run_tool(engine, step)
+                result = run_tool(engine, step, episode_id)
                 text = _compact(result)
                 err = None
             except Exception as e:
@@ -380,6 +428,11 @@ def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int 
         invalid = [c for c in step.citations if c not in seen_ids]
         already_revised = any("revise" in t for t in trace)
         bad_claims = contradicted_event_claims(engine, episode_id, step.text)
+        num_issue = numeric_claim_issue(engine, episode_id, question, step)
+        if num_issue and not already_revised:
+            trace.append({"step": i, "revise": "numeric claim disagrees with tools", "detail": num_issue["msg"]})
+            messages.append({"role": "user", "content": "TOOL RESULT: " + num_issue["msg"] + " Answer again using these numbers."})
+            continue
         if bad_claims and not already_revised:
             trace.append({"step": i, "revise": "event claim without evidence", "claims": bad_claims})
             messages.append({"role": "user", "content": f"TOOL RESULT: your answer mentions {bad_claims} but this episode contains no "
@@ -391,7 +444,8 @@ def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int 
                                                         "Answer again citing only ids you were shown, or say nothing matched."})
             continue
         final = {"action": "answer", "text": step.text, "citations": valid, "rejected_citations": invalid,
-                 "confidence": step.confidence, "cited": bool(valid), "unsupported_event_claims": bad_claims}
+                 "confidence": step.confidence, "cited": bool(valid), "unsupported_event_claims": bad_claims,
+                 "numeric_issue": num_issue["msg"] if num_issue else None}
         break
     if final is None:
         final = {"action": "answer", "text": "I could not complete this within the step budget.", "citations": [], "cited": False,

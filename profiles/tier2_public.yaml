@@ -1,0 +1,8 @@
+name: tier2_public
+extends: common
+branches: [pose, actions, density, plates]
+events: [crowd, loiter, run, left_behind, queue]
+zone_kinds: [entrance, exit, queue, shopfront, parking]
+notes: |
+  Fire/smoke has no commercial-licensed open detector worth shipping; the writer VLM on keyframes at
+  low cadence is the honest option and is what `inspect` does.

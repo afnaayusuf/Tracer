@@ -21,6 +21,16 @@ surveillance product.
 - **C5 Two-speed emission.** Geometry and events commit within ~100 ms of tick close; semantics
   arrive later as patches. No consumer blocks on the slow path.
 
+## 0b. Build-frames (tiers)
+
+The engine is horizontal; a deployment is a *profile* (`profiles/<tier>.yaml`) that extends `common`
+and selects branches of the one generator, the event and zone vocabularies, sampling rates and quality
+thresholds in scene units. `vi/generator/registry.py` lists every branch with its model, license,
+cadence and status; `plan()` resolves a profile against the runtime and reports what cannot run
+instead of failing. Tiers add capabilities; nothing is per-tier code. Any count, duration or
+"whole time" claim in an answer comes from the store's numeric tools (`count_entities`,
+`entities_present`, `coverage`), never from the model reading the script.
+
 ## 1. Topology (Block 1)
 
 ```
