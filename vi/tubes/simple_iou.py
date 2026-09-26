@@ -90,6 +90,7 @@ class SimpleIoUTracker:
             tr = self._tracks[live_ids[ti]]
             d = detections[di]
             tr.tube.box = d.box
+            tr.tube.max_height_px = max(tr.tube.max_height_px, d.box.height)
             tr.tube.last_seen = self._t(t_ms)
             tr.tube.state = TubeState.active
             tr.tube.occluded_since_ms = None

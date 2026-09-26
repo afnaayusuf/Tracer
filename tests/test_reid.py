@@ -90,3 +90,32 @@ def test_pick_features_unwraps_every_transformers_return_shape():
         def mean(self, dim): return self.a.mean(axis=dim)
     out = pick_features(SimpleNamespace(pooler_output=None, image_embeds=None, last_hidden_state=T(np.ones((2, 5, 4)))))
     assert out.shape == (2, 4)
+
+
+@pytest.mark.edge("E-TUBE-04")
+def test_near_reappearance_relinks_at_the_relaxed_bar_and_colour_gate_blocks_wrong_pairs():
+    a = unit(1)
+    b = unit(11); b -= (b @ a) * a; b /= np.linalg.norm(b)
+    weak = a * 0.7 + b * 0.714                               # cosine 0.70: under 0.75, over 0.65
+    lk = TubeLinker("c1", sim_thr=0.75, near_sim_thr=0.65, near_gap_ms=5000, near_jump_px=200)
+    t1 = tube("c1:0:1", 300); lk.on_birth(t1, a, 0); t1.state = TubeState.lost; lk.on_close(t1, 3000)
+    assert lk.on_birth(tube("c1:4000:2", 340, t=4000), weak, 4000) is not None       # 1 s, 40 px: relaxed bar applies
+    lk2 = TubeLinker("c1", sim_thr=0.75, near_sim_thr=0.65)
+    t1 = tube("c1:0:1", 300); lk2.on_birth(t1, a, 0); t1.state = TubeState.lost; lk2.on_close(t1, 3000)
+    assert lk2.on_birth(tube("c1:20000:2", 340, t=20000), weak, 20000) is None       # 17 s later: full bar, refused
+    # colour gate: same SigLIP-ish look, different vest colour -> not linked
+    green = np.zeros(48, np.float32); green[[3, 11, 19]] = 1; green /= np.linalg.norm(green)
+    orange = np.zeros(48, np.float32); orange[[5, 9, 21]] = 1; orange /= np.linalg.norm(orange)
+    lk3 = TubeLinker("c1", aux_thr=0.5)
+    t1 = tube("c1:0:1", 1200); lk3.on_birth(t1, a, 0, aux=green); t1.state = TubeState.lost; lk3.on_close(t1, 4000)
+    assert lk3.on_birth(tube("c1:5000:2", 1210, t=5000), a, 5000, aux=orange) is None    # identical embedding, wrong colour
+    assert lk3.on_birth(tube("c1:5500:3", 1210, t=5500), a, 5500, aux=green) is not None  # same colour: linked
+
+
+def test_quality_uses_the_largest_observed_height():
+    from vi.tubes import grade_tube
+    from vi.schemas import Box, CamTime, Tube
+    t = Tube(tube_id="c1:0:9", camera_id="c1", class_label="person", born=CamTime(cam_utc_ms=0),
+             last_seen=CamTime(cam_utc_ms=9700), box=Box(x1=600, y1=200, x2=620, y2=241), max_height_px=160)
+    grade_tube(t, 1280, 720)
+    assert t.quality == "ok"        # a 41-px final box after a 160-px life is not "tiny"

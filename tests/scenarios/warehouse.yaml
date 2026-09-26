@@ -21,11 +21,11 @@ questions:
   - q: How many distinct people were in this episode, and which of them stayed the whole time?
     must_mention: [["8", "eight", "7", "seven", "9", "nine"]]     # 8, ±1 tolerance while ReID matures
     must_not_mention: ["14", "13", "12", "11"]
-    must_cite_prefix: ["cam1:E"]
+    must_cite_prefix: ["cam1:E", "ev_"]
   - q: Who was at the conveyor on the right, and when did they arrive?
     must_mention: [["00:0", "start", "beginning", "0.0", "from the first", "already"]]   # the hard-hat worker is there from 0 s
     must_not_mention: []
-    must_cite_prefix: ["cam1:E"]
+    must_cite_prefix: ["cam1:E", "ev_"]      # any of: an entity id or the enter_zone event id
     later: ["hard hat", "hi-vis"]       # becomes must_mention once the writer VLM supplies attributes
   - q: Did anyone pick something up from a shelf?
     must_mention: [["no", "none", "nothing", "did not", "didn't", "not"]]

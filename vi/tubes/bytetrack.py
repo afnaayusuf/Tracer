@@ -151,6 +151,7 @@ class ByteTracker:
         for i, d in matched.items():
             tr = tracks[i]
             tr.tube.box = tr.kf.update(d.box)
+            tr.tube.max_height_px = max(tr.tube.max_height_px, d.box.height)
             tr.tube.last_seen = self._t(t_ms)
             tr.tube.occluded_since_ms = None
             tr.last_t_ms = t_ms
@@ -183,7 +184,8 @@ class ByteTracker:
                 continue
             tid = self._new_id(t_ms)
             tube = Tube(tube_id=tid, camera_id=self.camera_id, class_label=d.class_label, state=TubeState.born,
-                        born=self._t(t_ms), last_seen=self._t(t_ms), box=d.box, modality=self.modality)
+                        born=self._t(t_ms), last_seen=self._t(t_ms), box=d.box, modality=self.modality,
+                        max_height_px=d.box.height)
             if self.keyframe_sink is not None:
                 tube.keyframe_refs.append(self.keyframe_sink(self.camera_id, t_ms, d.box))
             tr = _Track(tube=tube, kf=KalmanBoxFilter(d.box), last_t_ms=t_ms, confirmed=self.confirm_ticks <= 1,

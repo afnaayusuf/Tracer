@@ -1,12 +1,146 @@
 [
-  {"zone_id": "packing_table", "camera_id": "cam1", "tile_id": "floor", "kind": "generic",
-   "polygon": [[455, 175], [775, 175], [775, 535], [455, 535]]},
-  {"zone_id": "conveyor", "camera_id": "cam1", "tile_id": "floor", "kind": "generic",
-   "polygon": [[1095, 230], [1280, 230], [1280, 460], [1095, 460]]},
-  {"zone_id": "dock_aisle", "camera_id": "cam1", "tile_id": "floor", "kind": "generic",
-   "polygon": [[1040, 115], [1280, 115], [1280, 232], [1040, 232]]},
-  {"zone_id": "dock_doors", "camera_id": "cam1", "tile_id": "floor", "kind": "exit",
-   "polygon": [[370, 0], [560, 0], [560, 115], [370, 115]]},
-  {"zone_id": "left_racking", "camera_id": "cam1", "tile_id": "floor", "kind": "media",
-   "polygon": [[0, 95], [145, 95], [145, 335], [0, 335]]}
+ {
+  "zone_id": "packing_table",
+  "camera_id": "cam1",
+  "tile_id": "floor",
+  "kind": "generic",
+  "polygon": [
+   [
+    455,
+    175
+   ],
+   [
+    775,
+    175
+   ],
+   [
+    775,
+    535
+   ],
+   [
+    455,
+    535
+   ]
+  ]
+ },
+ {
+  "zone_id": "conveyor",
+  "camera_id": "cam1",
+  "tile_id": "floor",
+  "kind": "generic",
+  "polygon": [
+   [
+    1095,
+    230
+   ],
+   [
+    1280,
+    230
+   ],
+   [
+    1280,
+    460
+   ],
+   [
+    1095,
+    460
+   ]
+  ]
+ },
+ {
+  "zone_id": "dock_aisle",
+  "camera_id": "cam1",
+  "tile_id": "floor",
+  "kind": "generic",
+  "polygon": [
+   [
+    1040,
+    115
+   ],
+   [
+    1280,
+    115
+   ],
+   [
+    1280,
+    232
+   ],
+   [
+    1040,
+    232
+   ]
+  ]
+ },
+ {
+  "zone_id": "dock_doors",
+  "camera_id": "cam1",
+  "tile_id": "floor",
+  "kind": "exit",
+  "polygon": [
+   [
+    370,
+    0
+   ],
+   [
+    560,
+    0
+   ],
+   [
+    560,
+    115
+   ],
+   [
+    370,
+    115
+   ]
+  ]
+ },
+ {
+  "zone_id": "left_racking",
+  "camera_id": "cam1",
+  "tile_id": "floor",
+  "kind": "media",
+  "polygon": [
+   [
+    0,
+    95
+   ],
+   [
+    145,
+    95
+   ],
+   [
+    145,
+    335
+   ],
+   [
+    0,
+    335
+   ]
+  ]
+ },
+ {
+  "zone_id": "coat_rack",
+  "camera_id": "cam1",
+  "tile_id": "floor",
+  "kind": "media",
+  "polygon": [
+   [
+    725,
+    140
+   ],
+   [
+    800,
+    140
+   ],
+   [
+    800,
+    275
+   ],
+   [
+    725,
+    275
+   ]
+  ]
+ }
 ]

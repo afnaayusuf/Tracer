@@ -68,7 +68,7 @@ Rules: (1) the episode's scene script is given to you; call tools only when it d
 mm:ss.s in scripts and absolute milliseconds in tool args. Respond with exactly one JSON object per turn:
 {"action":"tool","tool":...,"args":{...},"why":...} | {"action":"answer","text":...,"citations":[...],"confidence":...}
 | {"action":"clarify","question":...}. Count people from CONFIRMED entities; BRIEF SIGHTINGS are not people.
-Keep answers under 60 words; cite entity ids (cam1:E7), not tube ids, unless asked about tubes; mention only events
+Keep answers under 60 words and cite at most 8 ids; cite entity ids (cam1:E7), not tube ids, unless asked about tubes; mention only events
 that appear in the script or tool results.
 EVENT_TYPES: """ + ", ".join(EVENT_TYPES) + "\nTools: " + json.dumps(TOOL_SPECS)
 

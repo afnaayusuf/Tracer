@@ -29,7 +29,7 @@ from vi.gate import FrameDiffGate, HeartbeatScheduler
 from vi.ingest import VideoReader
 from vi.schemas import CamTime, Provenance, Tick, TubeSnapshot
 from vi.schemas.episode import CastMember, EpisodeStatus
-from vi.reid import crop_for_embedding, make_embedder
+from vi.reid import HistogramEmbedder, crop_for_embedding, make_embedder
 from vi.tubes import TRACKERS, TubeLinker, grade_tube
 
 
@@ -95,10 +95,12 @@ def main() -> None:
     duplicate_pairs: list[dict] = []                # two live person tubes on one body: the hybrid bug, caught in the act
     dup_frames: list[str] = []
     embedder = make_embedder(a.reid) if a.reid != "none" else None
+    aux_embedder = HistogramEmbedder() if embedder and embedder.name != "hist" else None
     linker = TubeLinker(a.camera, sim_thr=a.reid_sim) if embedder else None
     embed_ms: list[float] = []
     last_embed_tick: dict[str, int] = {}
     pending_link: dict[str, np.ndarray] = {}
+    pending_aux: dict[str, np.ndarray] = {}
     relink_events = 0
     debug_paths: list[str] = []
     person_dets: list[int] = []
@@ -180,25 +182,29 @@ def main() -> None:
             todo = due_birth + due_refresh
             if todo:
                 t0 = time.perf_counter()
-                embs = embedder.embed([crop_for_embedding(fr.rgb, t.box) for t in todo])
+                crops = [crop_for_embedding(fr.rgb, t.box) for t in todo]
+                embs = embedder.embed(crops)
+                auxs = aux_embedder.embed(crops) if aux_embedder else [None] * len(todo)
                 embed_ms.append((time.perf_counter() - t0) * 1000)
                 birth_ids = {x.tube_id for x in due_birth}
-                for t, e in zip(todo, embs):
+                for t, e, ax in zip(todo, embs, auxs):
                     last_embed_tick[t.tube_id] = frames
                     if t.tube_id in birth_ids:
                         pending_link[t.tube_id] = e
+                        if ax is not None:
+                            pending_aux[t.tube_id] = ax
                     else:
-                        linker.on_refresh(t, e)
+                        linker.on_refresh(t, e, ax)
             live_ids = {t.tube_id for t in live}
             for t in live:
                 if t.tube_id in pending_link and t.state.value == "active":
-                    ev = linker.on_birth(t, pending_link.pop(t.tube_id), fr.pts_ms)
+                    ev = linker.on_birth(t, pending_link.pop(t.tube_id), fr.pts_ms, pending_aux.pop(t.tube_id, None))
                     if ev is not None:
                         events.append(ev)
                         relink_events += 1
-                        print(f"t={fr.pts_ms:7d}  relink                 {ev.subject_tube_ids[0]} -> {ev.subject_tube_ids[1]} sim={ev.payload['similarity']}")
+                        print(f"t={fr.pts_ms:7d}  relink                 {ev.subject_tube_ids[0]} -> {ev.subject_tube_ids[1]} sim={ev.payload['similarity']} thr={ev.payload['threshold']}")
             for tid in [k for k in pending_link if k not in live_ids]:
-                pending_link.pop(tid)                       # deleted while unconfirmed: never linked
+                pending_link.pop(tid); pending_aux.pop(tid, None)    # deleted while unconfirmed: never linked
             for t in live:
                 if t.class_label == "person":
                     t.entity_id = linker.entity_of(t.tube_id)

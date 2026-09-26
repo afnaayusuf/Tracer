@@ -378,6 +378,11 @@
           "title": "Reflection Suspect",
           "type": "boolean"
         },
+        "max_height_px": {
+          "default": 0.0,
+          "title": "Max Height Px",
+          "type": "number"
+        },
         "quality": {
           "default": "ok",
           "enum": [

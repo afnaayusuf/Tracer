@@ -99,6 +99,7 @@ class Tube(BaseModel):
     occluded_since_ms: int | None = None
     merge_candidates: list[str] = Field(default_factory=list)  # E-TUBE-01: prefer flag over wrong merge
     reflection_suspect: bool = False                            # E-DET-04
+    max_height_px: float = 0.0             # largest observed box height; quality is judged on this, not the last box
     quality: Literal["ok", "low"] = "ok"   # low: brief, tiny or border-hugging (E-DET-01); counted apart from confirmed people
     quality_reason: str | None = None
 

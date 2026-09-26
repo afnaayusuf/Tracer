@@ -42,7 +42,7 @@ def score(res: dict, spec: dict, budget_ms: int) -> dict:
         "mentions": all(_mentioned(m, text) for m in spec.get("must_mention", []) or []),
         "avoids": not any(_one(m, text) for m in spec.get("must_not_mention", []) or []),
         "cites": (f.get("cited", False) or spec.get("expect_uncited_ok", False))
-                 and all(any(c.startswith(p) for c in f.get("citations", [])) for p in spec.get("must_cite_prefix", []) or []),
+                 and (not spec.get("must_cite_prefix") or any(any(c.startswith(p) for p in spec["must_cite_prefix"]) for c in f.get("citations", []))),
         "in_budget": res["latency"]["total_ms"] <= budget_ms,
     }
     return {"q": spec["q"], "pass": all(checks.values()), "checks": checks, "latency_ms": res["latency"]["total_ms"],

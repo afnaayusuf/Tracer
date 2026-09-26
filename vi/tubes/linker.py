@@ -27,6 +27,7 @@ class _Entity:
     tube_ids: list[str]
     ema: np.ndarray
     exemplars: list[np.ndarray] = field(default_factory=list)
+    aux: np.ndarray | None = None
     last_box_center: tuple[float, float] = (0.0, 0.0)
     last_box_h: float = 1.0
     lost_at_ms: int | None = None      # set when its current tube closed (lost or exited); None while live
@@ -36,9 +37,16 @@ class _Entity:
 class TubeLinker:
     def __init__(self, camera_id: str, sim_thr: float = 0.75, max_gap_ms: int = 30_000,
                  max_jump_px: float = 400.0, ema_alpha: float = 0.3, exemplars: int = 5,
-                 exited_sim_thr: float = 0.85):
+                 exited_sim_thr: float = 0.85, near_sim_thr: float = 0.65, near_gap_ms: int = 5000,
+                 near_jump_px: float = 200.0, aux_thr: float = 0.5):
         self.camera_id = camera_id
         self.sim_thr = sim_thr
+        # a tube reappearing within a few seconds and a couple of body-widths of where one vanished
+        # is the same person unless appearance says otherwise: the bar drops to near_sim_thr there
+        self.near_sim_thr, self.near_gap_ms, self.near_jump_px = near_sim_thr, near_gap_ms, near_jump_px
+        # a second, cheap appearance signal (colour histogram) must agree; it stops a generic image
+        # embedding from joining a green hi-vis vest to an orange one at the same spot
+        self.aux_thr = aux_thr
         self.exited_sim_thr = exited_sim_thr   # placeholder exit zones misclassify lost as exited; allow with more evidence
         self.max_gap_ms = max_gap_ms
         self.max_jump_px = max_jump_px
@@ -50,10 +58,11 @@ class TubeLinker:
         self.relinks = 0
 
     # ---------------------------------------------------------------- helpers
-    def _new_entity(self, tube: Tube, emb: np.ndarray) -> _Entity:
+    def _new_entity(self, tube: Tube, emb: np.ndarray, aux: np.ndarray | None = None) -> _Entity:
         self._seq += 1
         ent = _Entity(entity_id=f"{self.camera_id}:E{self._seq}", tube_ids=[tube.tube_id], ema=emb.copy(),
-                      exemplars=[emb.copy()], last_box_center=_center(tube), last_box_h=tube.box.height)
+                      exemplars=[emb.copy()], last_box_center=_center(tube), last_box_h=tube.box.height,
+                      aux=None if aux is None else aux.copy())
         self._entities[ent.entity_id] = ent
         self._tube_entity[tube.tube_id] = ent.entity_id
         return ent
@@ -77,34 +86,48 @@ class TubeLinker:
         return out
 
     # ---------------------------------------------------------------- API
-    def on_birth(self, tube: Tube, emb: np.ndarray, t_ms: int) -> Event | None:
+    def _thr(self, ent: _Entity, tube: Tube, t_ms: int) -> float:
+        if ent.closed_as_exit:
+            return self.exited_sim_thr
+        cx, cy = _center(tube)
+        dist = ((cx - ent.last_box_center[0]) ** 2 + (cy - ent.last_box_center[1]) ** 2) ** 0.5
+        gap = t_ms - (ent.lost_at_ms or t_ms)
+        return self.near_sim_thr if (gap <= self.near_gap_ms and dist <= self.near_jump_px) else self.sim_thr
+
+    def on_birth(self, tube: Tube, emb: np.ndarray, t_ms: int, aux: np.ndarray | None = None) -> Event | None:
         cands = self._candidates(tube, t_ms)
+        if aux is not None:   # second-signal gate first: candidates whose colour disagrees are out
+            cands = [e for e in cands if e.aux is None or float(e.aux @ aux) >= self.aux_thr]
         if cands:
             best = max(cands, key=lambda e: self._sim(e, emb))
             sim = self._sim(best, emb)
-            thr = self.exited_sim_thr if best.closed_as_exit else self.sim_thr
+            thr = self._thr(best, tube, t_ms)
             if sim >= thr:
                 prev = best.tube_ids[-1]
                 best.tube_ids.append(tube.tube_id)
                 best.lost_at_ms = None
                 self._tube_entity[tube.tube_id] = best.entity_id
-                self.on_refresh(tube, emb)
+                self.on_refresh(tube, emb, aux)
                 self.relinks += 1
                 return Event(event_id="ev_" + hashlib.sha1(f"relink|{prev}|{tube.tube_id}".encode()).hexdigest()[:16],
                              type=EventType.relink, t=CamTime(cam_utc_ms=t_ms), camera_id=self.camera_id,
                              subject_tube_ids=[prev, tube.tube_id], subject_entity_ids=[best.entity_id],
-                             payload={"similarity": round(sim, 3), "gap_ms": t_ms - (tube.born.corrected_ms())},
+                             payload={"similarity": round(sim, 3), "threshold": round(thr, 2),
+                                      "gap_ms": t_ms - (best.lost_at_ms or t_ms)},
                              confidence=min(1.0, sim))
-        self._new_entity(tube, emb)
+        self._new_entity(tube, emb, aux)
         return None
 
-    def on_refresh(self, tube: Tube, emb: np.ndarray) -> None:
+    def on_refresh(self, tube: Tube, emb: np.ndarray, aux: np.ndarray | None = None) -> None:
         eid = self._tube_entity.get(tube.tube_id)
         if eid is None:
             return
         e = self._entities[eid]
         e.ema = e.ema * (1 - self.ema_alpha) + emb * self.ema_alpha
         e.ema /= max(1e-8, np.linalg.norm(e.ema))
+        if aux is not None:
+            e.aux = aux.copy() if e.aux is None else (e.aux * 0.7 + aux * 0.3)
+            e.aux /= max(1e-8, np.linalg.norm(e.aux))
         e.exemplars.append(emb.copy())
         if len(e.exemplars) > self.n_exemplars:
             e.exemplars.pop(0)

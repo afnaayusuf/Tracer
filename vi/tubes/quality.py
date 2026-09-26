@@ -16,8 +16,9 @@ def grade_tube(tube: Tube, frame_w: int, frame_h: int) -> Tube:
     reasons = []
     if life < MIN_LIFE_MS:
         reasons.append(f"life {life / 1000:.1f}s")
-    if b.height < MIN_HEIGHT_PX:
-        reasons.append(f"height {int(b.height)}px")
+    h = max(tube.max_height_px, b.height)
+    if h < MIN_HEIGHT_PX:
+        reasons.append(f"height {int(h)}px")
     if b.x1 <= EDGE_PX or b.y1 <= EDGE_PX or b.x2 >= frame_w - EDGE_PX or b.y2 >= frame_h - EDGE_PX:
         reasons.append("at frame border")
     tube.quality = "low" if reasons else "ok"
