@@ -36,12 +36,15 @@ class ToolStep(BaseModel):
     action: Literal["tool"] = "tool"
     tool: Literal["search_events", "search_tubes", "search_entities", "get_script", "clip"]
     args: dict[str, Any] = Field(default_factory=dict)
-    why: str = Field("", max_length=200)
+    why: str = Field("", max_length=400)
+
+
+ANSWER_MAX_CHARS = 4000
 
 
 class AnswerStep(BaseModel):
     action: Literal["answer"] = "answer"
-    text: str = Field(max_length=1500)
+    text: str = Field(max_length=ANSWER_MAX_CHARS)
     citations: list[str] = Field(default_factory=list, description="entity ids, tube ids or event ids from tool results")
     confidence: float = Field(0.5, ge=0.0, le=1.0)
 
@@ -216,6 +219,24 @@ class TransformersBackend:
         return extract_json(tokenizer.decode(gen, skip_special_tokens=True))
 
 
+def _salvage(raw: str) -> AnswerStep | ClarifyStep | None:
+    """Accept an answer that only failed on length or a missing optional field; never a tool
+    call, which must be exact. Retrying seven times to trim a paragraph is not a behaviour."""
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("action") == "answer" and isinstance(obj.get("text"), str):
+        cites = obj.get("citations") or []
+        return AnswerStep(text=obj["text"][:ANSWER_MAX_CHARS], citations=[str(c) for c in cites if isinstance(c, (str, int))][:50],
+                          confidence=float(obj.get("confidence", 0.5)) if isinstance(obj.get("confidence"), (int, float)) else 0.5)
+    if obj.get("action") == "clarify" and isinstance(obj.get("question"), str):
+        return ClarifyStep(question=obj["question"][:300])
+    return None
+
+
 def run_tool(engine: Engine, step: ToolStep) -> Any:
     fn = {"search_events": T.search_events, "search_tubes": T.search_tubes, "search_entities": T.search_entities,
           "get_script": T.get_script, "clip": T.clip}[step.tool]
@@ -266,10 +287,14 @@ def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int 
         try:
             step = step_adapter.validate_json(raw)
         except ValidationError as e:
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({"role": "user", "content": f"TOOL RESULT: invalid step ({e.errors()[0]['msg']}); reply with one valid JSON object."})
-            trace.append({"step": i, "invalid": raw[:200]})
-            continue
+            step = _salvage(raw)                    # an over-long or slightly malformed answer is still an answer
+            if step is None:
+                reason = e.errors()[0]["msg"]
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": f"TOOL RESULT: invalid step ({reason}); reply with one valid JSON object."})
+                trace.append({"step": i, "invalid": raw[:200], "reason": reason})
+                continue
+            trace.append({"step": i, "salvaged": e.errors()[0]["msg"]})
         messages.append({"role": "assistant", "content": raw})
         if isinstance(step, ToolStep):
             result: Any = None

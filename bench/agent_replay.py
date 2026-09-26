@@ -65,6 +65,9 @@ def main() -> None:
             lat = res["latency"]
             print(f"\nQ: {q}\n   latency: {lat['total_ms'] / 1000:.1f}s total (model {lat['model_ms'] / 1000:.1f}s, tools {lat['tool_ms']}ms, "
                   f"{lat['turns']} turn(s), first prompt {lat['first_prompt_chars']} chars)\n   tools: " + (" | ".join(calls) or "none"))
+            bad = [t for t in res["trace"] if "invalid" in t or "salvaged" in t]
+            if bad:
+                print("   " + " | ".join(f"invalid: {t['reason'][:90]}" if "invalid" in t else f"salvaged: {t['salvaged'][:90]}" for t in bad[:3]))
             f = res["final"]
             if f["action"] == "answer":
                 print(f"   A ({f.get('confidence', 0):.2f}{'' if f['cited'] else ', UNCITED'}): {f['text']}\n   cites: {', '.join(f['citations']) or '—'}")

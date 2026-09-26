@@ -17,11 +17,21 @@ from vi.agent.loop import ID_RE
 from vi.store import connect
 
 
+import re
+
+
+def _one(r, text: str) -> bool:
+    r = str(r).lower()
+    if r.isdigit():                       # a number must stand alone: not part of 00:14.0, E14 or 140
+        return re.search(rf"(?<![\d:.\w]){re.escape(r)}(?![\d:.\w])", text) is not None
+    return r in text
+
+
 def _mentioned(rule, text: str) -> bool:
     """a string must appear; a list means any of its strings must appear"""
     if isinstance(rule, list):
-        return any(str(r).lower() in text for r in rule)
-    return str(rule).lower() in text
+        return any(_one(r, text) for r in rule)
+    return _one(rule, text)
 
 
 def score(res: dict, spec: dict, budget_ms: int) -> dict:

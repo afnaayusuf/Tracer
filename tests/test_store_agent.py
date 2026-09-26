@@ -182,3 +182,28 @@ def test_think_blocks_are_stripped_and_unknown_args_dropped(episode_path):
     load_episode_file(engine, episode_path)
     out = run_tool(engine, ToolStep(tool="search_events", args={"episode_id": "ep_x", "event_type": "pickup", "bogus": 1}))
     assert out[0]["note"].startswith("ignored unknown args") and "episode_id" in out[0]["note"] and len(out) == 2
+
+
+def test_overlong_answer_is_salvaged_not_retried(episode_path):
+    from vi.agent import ask
+    engine = connect()
+    load_episode_file(engine, episode_path)
+    ep = search_events(engine)[0]["episode_id"]
+
+    class LongWinded:
+        name = "long"
+        def complete(self, messages, schema):
+            import json
+            return json.dumps({"action": "answer", "text": "x" * 6000, "citations": ["cam1:2000:1"], "confidence": 0.7})
+    out = ask(engine, "anything", ep, LongWinded())
+    assert out["final"]["action"] == "answer" and len(out["final"]["text"]) == 4000 and out["final"]["cited"]
+    assert out["steps"] == 1 and "salvaged" in out["trace"][0]
+
+
+def test_scenario_numbers_must_stand_alone():
+    import importlib.util, sys
+    spec = importlib.util.spec_from_file_location("scenario_eval", "bench/scenario_eval.py")
+    m = importlib.util.module_from_spec(spec); sys.modules["scenario_eval"] = m; spec.loader.exec_module(m)
+    assert m._mentioned("14", "left at 00:14.0 and e14 and 140 people") is False
+    assert m._mentioned("14", "there were 14 people") is True
+    assert m._mentioned(["8", "eight"], "eight workers") is True

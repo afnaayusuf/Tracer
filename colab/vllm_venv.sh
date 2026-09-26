@@ -44,19 +44,15 @@ driver_cuda() {  # e.g. 12.8 from nvidia-smi; the torch build must not be newer 
 }
 
 install_vllm() {
-  if "$VENV/bin/python" -c "import vllm" 2>/dev/null; then
-    have="$("$VENV/bin/python" -c "import torch; print(torch.version.cuda or '')" 2>/dev/null)"
-    main="$(python3 -c "import torch; print(torch.version.cuda or '')" 2>/dev/null || true)"
-    if [ -n "$have" ] && [ -n "$main" ] && [ "$have" != "$main" ]; then
-      echo "-- venv torch is cu$have but the runtime's torch is cu$main (its CUDA libs are on LD_LIBRARY_PATH): rebuilding to match"
-      rm -rf "$VENV"; make_venv || return 1
-    else
-      return 0
-    fi
+  if [ -x "$VENV/bin/python" ]; then
+    if "$VENV/bin/python" -c "import vllm" >/tmp/vllm_import.log 2>&1; then return 0; fi
+    echo "-- venv exists but 'import vllm' fails ($(grep -oE "ImportError: [^\n]*|ModuleNotFoundError: [^\n]*" /tmp/vllm_import.log | head -1 | cut -c1-100)): rebuilding"
+    rm -rf "$VENV"; make_venv || return 1
   fi
   drv="$(driver_cuda)"
-  main_cu="$(python3 -c "import torch; print((torch.version.cuda or '').replace('.', ''))" 2>/dev/null || true)"
-  backend="${VLLM_TORCH_BACKEND:-${main_cu:+cu$main_cu}}"; backend="${backend:-auto}"
+  # vLLM's PyPI wheel links libcudart of a fixed CUDA major (13 for 0.30); the torch build must match
+  # the driver's CUDA, not the runtime's torch (session 18 forced cu128 and broke vllm._C).
+  backend="${VLLM_TORCH_BACKEND:-auto}"
   echo "-- installing vllm into the venv (driver CUDA ${drv:-?}, torch backend $backend; 3-6 min)"
   if command -v uv >/dev/null 2>&1 && uv pip install --python "$VENV/bin/python" -q --torch-backend="$backend" vllm >/tmp/vllm_install.log 2>&1; then echo "   ok (uv, torch-backend=$backend)"; return 0; fi
   echo "   uv with --torch-backend failed: $(tail -1 /tmp/vllm_install.log | cut -c1-120)"
