@@ -23,7 +23,7 @@ questions:
     must_not_mention: ["14", "13", "12", "11"]
     must_cite_prefix: ["cam1:E"]
   - q: Who was at the conveyor on the right, and when did they arrive?
-    must_mention: [["00:0", "start", "beginning", "0.0", "from the first"]]   # the hard-hat worker is there from 0 s
+    must_mention: [["00:0", "start", "beginning", "0.0", "from the first", "already"]]   # the hard-hat worker is there from 0 s
     must_not_mention: []
     must_cite_prefix: ["cam1:E"]
     later: ["hard hat", "hi-vis"]       # becomes must_mention once the writer VLM supplies attributes

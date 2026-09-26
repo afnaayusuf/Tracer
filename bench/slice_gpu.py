@@ -56,7 +56,7 @@ def main() -> None:
     ap.add_argument("--reid-sim", type=float, default=0.75)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--max-frames", type=int, default=600)
-    ap.add_argument("--zones", default=None, help="JSON zones file; default = edge exits + centre floor")
+    ap.add_argument("--zones", default=None, help="JSON zones file; default: data/zones/<clip stem>.json if present, else edge exits + centre floor")
     ap.add_argument("--iou-thr", type=float, default=0.2, help="tracker IoU at sampled fps")
     ap.add_argument("--max-occluded-ms", type=int, default=2500)
     ap.add_argument("--out", default="data/episodes")
@@ -111,7 +111,10 @@ def main() -> None:
         h, w = fr.rgb.shape[:2]
         current["frame"] = fr.rgb
         if zones is None:   # first frame: zones need the native size
-            zones = load_zones(a.zones, a.camera) if a.zones else default_zones(a.camera, w, h, tile_id=a.tile)
+            zones_path = a.zones or (str(Path("data/zones") / (Path(a.source).stem + ".json")) if (Path("data/zones") / (Path(a.source).stem + ".json")).exists() else None)
+            zones = load_zones(zones_path, a.camera) if zones_path else default_zones(a.camera, w, h, tile_id=a.tile)
+            media_zones = [z for z in zones if z.kind == "media"]
+            print(f"zones: {[z.zone_id for z in zones]} ({'file ' + zones_path if zones_path else 'defaults'})")
             exit_boxes = [z.polygon for z in zones if z.kind == "exit"]
             from vi.schemas import Box
             exits = [Box(x1=min(p[0] for p in poly), y1=min(p[1] for p in poly),
@@ -141,6 +144,8 @@ def main() -> None:
             for r, d in zip(chunk, det.detect_batch(crops)[:real]):
                 dets += remap_detections(d, r, w, h)
         dets = dedupe_detections([d for d in dets if is_tube_class(d.class_label)])   # E-DET-10
+        if media_zones:   # E-DET-05: jackets on a rack, posters, screens are not people
+            dets = [d for d in dets if not any(z.contains(d.box.foot_point()) for z in media_zones)]
         person_dets.append(sum(1 for d in dets if d.class_label == "person" and d.confidence >= 0.5))
         dt_detect = time.perf_counter() - t0
         if frames >= a.warmup:

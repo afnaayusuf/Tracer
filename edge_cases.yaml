@@ -126,8 +126,8 @@ cases:
   ring: ring1
   title: People on screens, posters, photos
   trigger: TV shows a face; framed photo detected as person.
-  handling: media_zones from scene card; detections fully inside a media zone with no tube motion are dropped.
-  status: planned
+  handling: zones of kind `media` (scene card, or data/zones/<clip>.json) drop any detection whose foot point falls inside them; the warehouse clip's hanging jackets on the left racking are the first case.
+  status: implemented
 - id: E-DET-06
   ring: ring1
   title: Dense crowds

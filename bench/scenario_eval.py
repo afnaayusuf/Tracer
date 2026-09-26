@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 
 from vi.agent import FakeBackend, OpenAIBackend, TransformersBackend, ask, search_events
+from vi.agent.loop import ID_RE
 from vi.store import connect
 
 
@@ -25,7 +26,7 @@ def _mentioned(rule, text: str) -> bool:
 
 def score(res: dict, spec: dict, budget_ms: int) -> dict:
     f = res["final"]
-    text = (f.get("text") or f.get("question") or "").lower()
+    text = ID_RE.sub(" ", f.get("text") or f.get("question") or "").lower()    # ids are not numbers
     checks = {
         "answered": f["action"] == "answer",
         "mentions": all(_mentioned(m, text) for m in spec.get("must_mention", []) or []),

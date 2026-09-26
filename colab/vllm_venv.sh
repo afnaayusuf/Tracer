@@ -46,16 +46,17 @@ driver_cuda() {  # e.g. 12.8 from nvidia-smi; the torch build must not be newer 
 install_vllm() {
   if "$VENV/bin/python" -c "import vllm" 2>/dev/null; then
     have="$("$VENV/bin/python" -c "import torch; print(torch.version.cuda or '')" 2>/dev/null)"
-    drv="$(driver_cuda)"
-    if [ -n "$have" ] && [ -n "$drv" ] && [ "$(printf '%s\n%s\n' "$drv" "$have" | sort -V | tail -1)" != "$drv" ]; then
-      echo "-- venv torch is cu$have but the driver supports $drv: reinstalling for this driver"
+    main="$(python3 -c "import torch; print(torch.version.cuda or '')" 2>/dev/null || true)"
+    if [ -n "$have" ] && [ -n "$main" ] && [ "$have" != "$main" ]; then
+      echo "-- venv torch is cu$have but the runtime's torch is cu$main (its CUDA libs are on LD_LIBRARY_PATH): rebuilding to match"
       rm -rf "$VENV"; make_venv || return 1
     else
       return 0
     fi
   fi
   drv="$(driver_cuda)"
-  backend="${VLLM_TORCH_BACKEND:-auto}"
+  main_cu="$(python3 -c "import torch; print((torch.version.cuda or '').replace('.', ''))" 2>/dev/null || true)"
+  backend="${VLLM_TORCH_BACKEND:-${main_cu:+cu$main_cu}}"; backend="${backend:-auto}"
   echo "-- installing vllm into the venv (driver CUDA ${drv:-?}, torch backend $backend; 3-6 min)"
   if command -v uv >/dev/null 2>&1 && uv pip install --python "$VENV/bin/python" -q --torch-backend="$backend" vllm >/tmp/vllm_install.log 2>&1; then echo "   ok (uv, torch-backend=$backend)"; return 0; fi
   echo "   uv with --torch-backend failed: $(tail -1 /tmp/vllm_install.log | cut -c1-120)"
@@ -74,7 +75,10 @@ install_vllm || exit 1
 "$VENV/bin/python" -c "import vllm, torch; print('   vllm', vllm.__version__, 'torch', torch.__version__, 'cuda', torch.version.cuda)" || exit 1
 echo "   driver CUDA $(driver_cuda)"
 pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true
-nohup "$VENV/bin/python" -m vllm.entrypoints.openai.api_server --model "$MODEL" --port "$PORT" \
+# clean process environment: no PYTHONPATH, no user site, and only the driver's library dir on LD_LIBRARY_PATH
+# (Colab's LD_LIBRARY_PATH points at the main environment's CUDA libraries, which can shadow the venv's)
+nohup env -u PYTHONPATH PYTHONNOUSERSITE=1 LD_LIBRARY_PATH="${VLLM_LD_LIBRARY_PATH:-/usr/lib64-nvidia}" \
+  "$VENV/bin/python" -m vllm.entrypoints.openai.api_server --model "$MODEL" --port "$PORT" \
   --max-model-len 16384 --gpu-memory-utilization "${VLLM_GPU_UTIL:-0.6}" --dtype bfloat16 --max-num-seqs 4 \
   --enable-prefix-caching > "$LOG" 2>&1 &
 echo "-- waiting for http://127.0.0.1:$PORT (weights download on first run)"
@@ -82,7 +86,7 @@ for i in $(seq 1 120); do
   if curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
     echo "   vLLM up: $(curl -s "http://127.0.0.1:$PORT/v1/models" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["id"])')"; exit 0
   fi
-  if ! pgrep -f "vllm.entrypoints.openai.api_server" >/dev/null; then echo "   server exited; log tail:"; tail -12 "$LOG"; exit 1; fi
+  if ! pgrep -f "vllm.entrypoints.openai.api_server" >/dev/null; then echo "   server exited; root cause:"; root_cause; exit 1; fi
   sleep 5
 done
 echo "   server did not come up in 10 min; root cause:"; root_cause; exit 1

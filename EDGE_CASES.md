@@ -1,6 +1,6 @@
 # Edge-case registry
 
-Generated from `edge_cases.yaml` by `make edge-doc`. 78 cases, 43 implemented and tested.
+Generated from `edge_cases.yaml` by `make edge-doc`. 78 cases, 44 implemented and tested.
 
 Status: **implemented** = code path exists and a test marked `@pytest.mark.edge("ID")` exercises it; **planned** = month-1 scope; **deferred** = tracked, not month 1.
 
@@ -37,7 +37,7 @@ Status: **implemented** = code path exists and a test marked `@pytest.mark.edge(
 | E-DET-02 | Truncation at frame edge | Half a person at the border. | remap_detections flags boxes within 2 px of the frame border as truncated; Ring 2 then uses fallback_bbox_bottom with wide uncertainty and keyframe scoring penalises them. | implemented | test_detect_roi.py::test_remap_shifts_boxes_and_flags_frame_border_truncation |
 | E-DET-03 | Class confusion | Child vs small adult; dog vs bag; mannequin vs person. | Class is an attribute with confidence; enrichment can override; agent never asserts class below threshold. | planned | — |
 | E-DET-04 | Ghost detections in reflections | Mirror/glass shows a duplicate person. | Tubes inside reflective_surfaces are reflection_suspect; fusion never creates an entity from a suspect tube alone. | planned | — |
-| E-DET-05 | People on screens, posters, photos | TV shows a face; framed photo detected as person. | media_zones from scene card; detections fully inside a media zone with no tube motion are dropped. | planned | — |
+| E-DET-05 | People on screens, posters, photos | TV shows a face; framed photo detected as person. | zones of kind `media` (scene card, or data/zones/<clip>.json) drop any detection whose foot point falls inside them; the warehouse clip's hanging jackets on the left racking are the first case. | implemented | test_slice_gpu_smoke.py::test_media_zone_suppresses_detections_and_zone_file_is_picked_up |
 | E-DET-06 | Dense crowds | Heavy overlap; fragmentation. | crowd event on density; tube quality flag; enrichment skipped for low-quality tubes. | deferred | — |
 | E-DET-07 | Fisheye or wide-lens distortion | Homography from a distorted image. | fov_class from scene card; undistort before foot-point projection. | deferred | — |
 | E-DET-08 | IR appearance shift lowers recall | Night mode. | Measured on night eval set before any enhancer; enhancer only if gap is real and license clear. | planned | — |
