@@ -30,7 +30,7 @@ from vi.ingest import VideoReader
 from vi.schemas import CamTime, Provenance, Tick, TubeSnapshot
 from vi.schemas.episode import CastMember, EpisodeStatus
 from vi.reid import crop_for_embedding, make_embedder
-from vi.tubes import TRACKERS, TubeLinker
+from vi.tubes import TRACKERS, TubeLinker, grade_tube
 
 
 def main() -> None:
@@ -254,6 +254,7 @@ def main() -> None:
     cast = [CastMember(tube_ids=[t.tube_id], class_label=t.class_label, best_keyframe_ref=(t.keyframe_refs or [None])[0])
             for t in tubes]
     for t in tubes:
+        grade_tube(t, w, h)
         writer.write_tube(ep, t)
     writer.close(ep, CamTime(cam_utc_ms=fr.pts_ms + tick_ms), EpisodeStatus.closed, cast)
     st = reader.stats
@@ -266,6 +267,7 @@ def main() -> None:
         "detect_ms_p95": round(float(np.percentile(detect_ms, 95)), 2) if detect_ms else None,
         "tubes_total": len(tubes), "tubes_live_at_end": len(tracker._tracks),
         "person_tubes": sum(1 for t in tubes if t.class_label == "person"),
+        "person_tubes_low_quality": sum(1 for t in tubes if t.class_label == "person" and t.quality == "low"),
         "person_dets_per_frame": round(float(np.mean(person_dets)), 2) if person_dets else 0,
         "max_concurrent_persons": max(concurrent_persons) if concurrent_persons else 0,
         "person_visibility_duty": round(state_ticks["active"] / max(1, state_ticks["active"] + state_ticks["occluded"]), 3),

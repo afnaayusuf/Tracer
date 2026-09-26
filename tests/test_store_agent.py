@@ -61,7 +61,7 @@ def test_agent_loop_cites_only_ids_it_was_shown(episode_path):
     out = ask(engine, "Who took the bike keys?", ep, FakeBackend())
     assert out["final"]["action"] == "answer" and out["final"]["cited"]
     assert any(c.startswith("ev_") for c in out["final"]["citations"])
-    assert [t["tool"] for t in out["trace"] if "tool" in t][:2] == ["get_script", "search_events"]
+    assert [t["tool"] for t in out["trace"] if "tool" in t] == ["search_events"]     # script was inlined
     bad = ask(engine, "Who took the bike keys?", ep, FakeBackend(bogus_citation=True))
     revise = next(t for t in bad["trace"] if "revise" in t)     # asked to revise once, naming the bad id
     assert revise["invalid"] == ["ev_deadbeefdeadbeef"] and bad["final"]["cited"] is False
@@ -137,3 +137,37 @@ def test_transformers_backend_pipeline_with_a_stub_model():
     b.torch, b.model, b.tok, b.device, b.max_new_tokens = T(), Model(), Tok(), "cpu", 10
     out = b.complete([{"role": "system", "content": "sys"}, {"role": "user", "content": "q"}], {})
     assert out == '{"action":"clarify","question":"which person?"}'
+
+
+def test_inline_script_saves_the_first_round_trip_and_reports_latency(episode_path):
+    from vi.agent import FakeBackend, ask
+    engine = connect()
+    load_episode_file(engine, episode_path)
+    ep = search_events(engine)[0]["episode_id"]
+    fast = ask(engine, "Who took the bike keys?", ep, FakeBackend(), inline_script=True)
+    slow = ask(engine, "Who took the bike keys?", ep, FakeBackend(), inline_script=False)
+    assert [t["tool"] for t in fast["trace"] if "tool" in t] == ["search_events"]
+    assert [t["tool"] for t in slow["trace"] if "tool" in t] == ["get_script", "search_events"]
+    assert fast["latency"]["turns"] < slow["latency"]["turns"] and fast["latency"]["total_ms"] >= 0
+    assert "SCENE SCRIPT" not in fast["final"]["text"] and fast["final"]["cited"]
+
+
+@pytest.mark.edge("E-AGT-04")
+def test_unknown_event_type_is_rejected_with_the_valid_list():
+    from vi.agent.loop import ToolStep, run_tool
+    engine = connect()
+    with pytest.raises(ValueError, match="pickup"):
+        run_tool(engine, ToolStep(tool="search_events", args={"event_type": "pick_up"}))
+
+
+def test_script_separates_confirmed_people_from_brief_sightings(tmp_path, episode_path):
+    from vi.tubes import grade_tube
+    from vi.schemas import Box, CamTime, Tube
+    t = Tube(tube_id="c1:0:9", camera_id="c1", class_label="person", born=CamTime(cam_utc_ms=0),
+             last_seen=CamTime(cam_utc_ms=300), box=Box(x1=1, y1=100, x2=30, y2=140))
+    grade_tube(t, 1280, 720)
+    assert t.quality == "low" and "life 0.3s" in t.quality_reason and "at frame border" in t.quality_reason
+    engine = connect()
+    load_episode_file(engine, episode_path)
+    ep = search_events(engine)[0]["episode_id"]
+    assert "confirmed entities" in get_script(engine, ep, cache=False)

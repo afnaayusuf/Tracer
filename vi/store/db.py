@@ -31,12 +31,14 @@ tubes = Table(
     Column("born_ms", BigInteger, index=True), Column("last_seen_ms", BigInteger), Column("box", JSON),
     Column("zone_ids", JSON), Column("modality", String), Column("keyframe_refs", JSON),
     Column("attributes", JSON), Column("merge_candidates", JSON),
+    Column("quality", String), Column("quality_reason", String),
 )
 entities = Table(
     "entities", metadata,
     Column("entity_id", String, primary_key=True), Column("camera_id", String), Column("named", String),
     Column("class_label", String), Column("tube_ids", JSON), Column("first_seen_ms", BigInteger, index=True),
     Column("last_seen_ms", BigInteger), Column("best_keyframe_ref", String), Column("embedding", JSON),
+    Column("quality", String),
 )
 events = Table(
     "events", metadata,

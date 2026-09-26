@@ -5,6 +5,7 @@
 # pip bootstrap -> virtualenv. Each failure is printed and the next method is tried.
 #   bash colab/vllm_venv.sh start [model] [port]   # install if needed, serve in background, wait
 #   bash colab/vllm_venv.sh stop
+#   bash colab/vllm_venv.sh status                  # up | down
 #   bash colab/vllm_venv.sh venv                    # only build the venv (smoke test)
 set -uo pipefail
 VENV="${VLLM_VENV:-/content/vllm-venv}"
@@ -13,6 +14,12 @@ PORT="${3:-8000}"
 LOG="/tmp/vllm.log"
 cmd="${1:-start}"
 if [ "$cmd" = stop ]; then pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true; echo "stopped"; exit 0; fi
+if [ "$cmd" = status ]; then curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 && echo "up" || { echo "down"; exit 1; }; exit 0; fi
+if [ "$cmd" = start ] && curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
+  served="$(curl -s "http://127.0.0.1:$PORT/v1/models" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["id"])')"
+  if [ "$served" = "$MODEL" ]; then echo "   vLLM already up: $served (reusing; run 'stop' to restart)"; exit 0; fi
+  echo "   vLLM up with $served, restarting for $MODEL"; pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true; sleep 3
+fi
 pipi() { pip install -q "$@" 2>/dev/null || pip install -q --break-system-packages "$@"; }
 
 make_venv() {
@@ -46,7 +53,8 @@ install_vllm || exit 1
 "$VENV/bin/python" -c "import vllm, torch; print('   vllm', vllm.__version__, 'torch', torch.__version__, 'cuda', torch.version.cuda)" || exit 1
 pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true
 nohup "$VENV/bin/python" -m vllm.entrypoints.openai.api_server --model "$MODEL" --port "$PORT" \
-  --max-model-len 16384 --gpu-memory-utilization "${VLLM_GPU_UTIL:-0.6}" --dtype bfloat16 --max-num-seqs 4 > "$LOG" 2>&1 &
+  --max-model-len 16384 --gpu-memory-utilization "${VLLM_GPU_UTIL:-0.6}" --dtype bfloat16 --max-num-seqs 4 \
+  --enable-prefix-caching > "$LOG" 2>&1 &
 echo "-- waiting for http://127.0.0.1:$PORT (weights download on first run)"
 for i in $(seq 1 120); do
   if curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then

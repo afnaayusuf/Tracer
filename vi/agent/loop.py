@@ -10,16 +10,21 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from sqlalchemy.engine import Engine
 
+from vi.schemas import EventType
+
 from . import tools as T
+
+EVENT_TYPES = [e.value for e in EventType]
 
 TOOL_SPECS = {
     "search_events": "Events by time window / zone / type / entity. args: tile_id, camera_id, t_start_ms, t_end_ms, "
-                     "event_type (str or list), zone_id, entity_id, tube_id, limit",
+                     "event_type (one of EVENT_TYPES, or a list), zone_id, entity_id, tube_id, limit",
     "search_tubes": "Tubes (per-camera tracks). args: tile_id, camera_id, class_label, t_start_ms, t_end_ms, entity_id, named, min_life_ms, limit",
     "search_entities": "Entities (people/objects across tubes). args: camera_id, class_label, t_start_ms, t_end_ms, named, limit",
     "get_script": "The scene script of an episode (cast + timeline). args: episode_id",
@@ -51,14 +56,16 @@ step_adapter: TypeAdapter = TypeAdapter(AgentStep)
 STEP_SCHEMA = step_adapter.json_schema()
 
 SYSTEM = """You answer questions about video by calling tools over an evidence store; you never see video.
-Rules: (1) call get_script first for the episode in scope; (2) every claim in an answer must cite ids
+Rules: (1) the episode's scene script is given to you; call tools only when it does not answer the question;
+(2) every claim in an answer must cite ids
 (entity ids like cam1:E3, tube ids like cam1:4000:10, event ids like ev_...) that appeared in tool results;
 (3) if nothing matches, say so and suggest how to widen the search; never invent people, times or events;
 (4) if the question is ambiguous (which person, which time), ask one clarifying question;
 (5) answer over entities, not tubes; a person may have several tubes; (6) times are episode-relative
 mm:ss.s in scripts and absolute milliseconds in tool args. Respond with exactly one JSON object per turn:
 {"action":"tool","tool":...,"args":{...},"why":...} | {"action":"answer","text":...,"citations":[...],"confidence":...}
-| {"action":"clarify","question":...}. Tools: """ + json.dumps(TOOL_SPECS)
+| {"action":"clarify","question":...}. Count people from CONFIRMED entities; BRIEF SIGHTINGS are not people.
+EVENT_TYPES: """ + ", ".join(EVENT_TYPES) + "\nTools: " + json.dumps(TOOL_SPECS)
 
 ID_RE = re.compile(r"\b(ev_[0-9a-f]{16}|[A-Za-z0-9_]+:E\d+|anon:[A-Za-z0-9_:]+|[A-Za-z0-9_]+:\d+:\d+)\b")
 
@@ -74,12 +81,13 @@ class FakeBackend:
 
     def complete(self, messages: list[dict], schema: dict) -> str:
         user = [m for m in messages if m["role"] == "user"]
-        q = user[0]["content"].lower()
+        q = user[0]["content"].split("Question:")[-1].lower()     # the question, not the inlined script
         n_tool_results = sum(1 for m in messages if m["role"] == "user" and m["content"].startswith("TOOL RESULT"))
-        if n_tool_results == 0:
+        has_script = "SCENE SCRIPT:" in user[0]["content"]
+        if n_tool_results == 0 and not has_script:
             ep = re.search(r"episode (ep_[0-9a-f]+)", user[0]["content"], re.IGNORECASE)
             return json.dumps({"action": "tool", "tool": "get_script", "args": {"episode_id": ep.group(1) if ep else ""}, "why": "read the script"})
-        if n_tool_results == 1:
+        if n_tool_results == (0 if has_script else 1):
             if "key" in q or "pickup" in q or "took" in q:
                 return json.dumps({"action": "tool", "tool": "search_events", "args": {"event_type": "pickup"}, "why": "custody"})
             if "nobody" in q or "unicorn" in q:
@@ -200,6 +208,11 @@ def run_tool(engine: Engine, step: ToolStep) -> Any:
     fn = {"search_events": T.search_events, "search_tubes": T.search_tubes, "search_entities": T.search_entities,
           "get_script": T.get_script, "clip": T.clip}[step.tool]
     args = {k: v for k, v in step.args.items() if v is not None}
+    if step.tool == "search_events" and args.get("event_type"):
+        types = args["event_type"] if isinstance(args["event_type"], list) else [args["event_type"]]
+        bad = [t for t in types if t not in EVENT_TYPES]
+        if bad:
+            raise ValueError(f"unknown event_type {bad}; valid: {', '.join(EVENT_TYPES)}")
     if step.tool == "get_script":
         return fn(engine, args.get("episode_id", ""))
     return fn(engine, **args)
@@ -210,16 +223,28 @@ def _compact(result: Any, limit: int = 6000) -> str:
     return text if len(text) <= limit else text[:limit] + f"... [{len(text) - limit} more chars]"
 
 
-def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int = 8) -> dict:
-    """Run the loop. Returns the final step plus the trace (every tool call and result size), the
-    set of ids the model actually saw, and the citation audit (E-AGT-06)."""
-    messages = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": f"Episode {episode_id}. Question: {question}"}]
+def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int = 6,
+        inline_script: bool = True) -> dict:
+    """Run the loop. With inline_script the scene script is placed in the first user message so
+    the model's first turn is already a search or an answer (one round trip saved) and the
+    server's prefix cache holds system+script across questions on the same episode. Returns the
+    final step, the trace, the citation audit (E-AGT-06) and latency."""
+    t_start = time.perf_counter()
     seen_ids: set[str] = set()
+    first = f"Episode {episode_id}."
+    if inline_script:
+        script = T.get_script(engine, episode_id)
+        seen_ids.update(ID_RE.findall(script))
+        first += f"\n\nSCENE SCRIPT:\n{script}"
+    first += f"\n\nQuestion: {question}"
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": first}]
     trace: list[dict] = []
     final: dict | None = None
+    model_ms, tool_ms = 0.0, 0.0
     for i in range(max_steps):
+        t0 = time.perf_counter()
         raw = backend.complete(messages, STEP_SCHEMA)
+        model_ms += (time.perf_counter() - t0) * 1000
         try:
             step = step_adapter.validate_json(raw)
         except ValidationError as e:
@@ -230,12 +255,14 @@ def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int 
         messages.append({"role": "assistant", "content": raw})
         if isinstance(step, ToolStep):
             result: Any = None
+            t0 = time.perf_counter()
             try:
                 result = run_tool(engine, step)
                 text = _compact(result)
                 err = None
             except Exception as e:
                 text, err = f"error: {type(e).__name__}: {e}", str(e)
+            tool_ms += (time.perf_counter() - t0) * 1000
             seen_ids.update(ID_RE.findall(text))
             n = len(result) if isinstance(result, list) else (1 if result else 0)
             trace.append({"step": i, "tool": step.tool, "args": step.args, "results": n, "error": err})
@@ -258,5 +285,9 @@ def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int 
     if final is None:
         final = {"action": "answer", "text": "I could not complete this within the step budget.", "citations": [], "cited": False,
                  "confidence": 0.0}
+    total_ms = (time.perf_counter() - t_start) * 1000
     return {"question": question, "episode_id": episode_id, "backend": getattr(backend, "name", "?"),
-            "steps": len(trace), "trace": trace, "final": final}
+            "steps": len(trace), "trace": trace, "final": final,
+            "latency": {"total_ms": round(total_ms), "model_ms": round(model_ms), "tool_ms": round(tool_ms),
+                        "turns": sum(1 for t in trace if "tool" in t or "revise" in t or "invalid" in t) + 1,
+                        "first_prompt_chars": len(first)}}

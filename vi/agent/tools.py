@@ -120,16 +120,33 @@ def get_script(engine: Engine, episode_id: str, max_events: int = 400, cache: bo
     by_entity: dict[str, list[dict]] = {}
     for r in tube_rows:
         by_entity.setdefault(r["entity_id"], []).append(r)
-    lines = [f"EPISODE {ep['episode_id']} | tile {ep['tile_id']} | cameras {','.join(ep['camera_ids'] or [])} | "
-             f"{_ts(t0, t0)}–{_ts(ep['t1_ms'] or t0, t0)} | status {ep['status']} | kb v{ep['kb_version']}",
-             f"CAST: {len(by_entity)} entities, {len(tube_rows)} tubes"]
-    for eid, rows in by_entity.items():
+    def ent_line(eid: str, rows: list[dict]) -> str:
         first, last = min(r["born_ms"] for r in rows), max(r["last_seen_ms"] for r in rows)
         name = rows[0]["named"] or ("anonymous" if eid.startswith("anon:") else "unnamed")
         kf = next((k for r in rows for k in (r["keyframe_refs"] or [])), None)
-        lines.append(f"  {eid}  {rows[0]['class_label']}  {name}  tubes {','.join(r['tube_id'] for r in rows)}  "
-                     f"seen {_ts(first, t0)}–{_ts(last, t0)}  states {','.join(sorted({r['state'] for r in rows}))}"
-                     + (f"  keyframe {kf}" if kf else ""))
+        attrs = next((r["attributes"] for r in rows if r.get("attributes")), None)
+        desc = ""
+        if attrs:
+            bits = [attrs.get("description") or "", f"top {attrs['top_color']}" if attrs.get("top_color") else "",
+                    f"carrying {attrs['carried_item']}" if attrs.get("carried_item") else ""]
+            desc = "  looks: " + "; ".join(b for b in bits if b)
+        return (f"  {eid}  {rows[0]['class_label']}  {name}  tubes {','.join(r['tube_id'] for r in rows)}  "
+                f"seen {_ts(first, t0)}–{_ts(last, t0)}  states {','.join(sorted({r['state'] for r in rows}))}"
+                + (f"  keyframe {kf}" if kf else "") + desc)
+
+    confirmed = {e: rows for e, rows in by_entity.items() if any(r.get("quality", "ok") == "ok" for r in rows)}
+    brief = {e: rows for e, rows in by_entity.items() if e not in confirmed}
+    people = sum(1 for rows in confirmed.values() if rows[0]["class_label"] == "person")
+    lines = [f"EPISODE {ep['episode_id']} | tile {ep['tile_id']} | cameras {','.join(ep['camera_ids'] or [])} | "
+             f"{_ts(t0, t0)}–{_ts(ep['t1_ms'] or t0, t0)} | status {ep['status']} | kb v{ep['kb_version']}",
+             f"CAST: {len(confirmed)} confirmed entities ({people} people), {len(brief)} brief sightings, {len(tube_rows)} tubes"]
+    for eid, rows in confirmed.items():
+        lines.append(ent_line(eid, rows))
+    if brief:
+        lines.append("BRIEF SIGHTINGS (low quality: too short, too small or at the frame border; not counted as people):")
+        for eid, rows in brief.items():
+            reason = next((r.get("quality_reason") for r in rows if r.get("quality_reason")), "")
+            lines.append(ent_line(eid, rows) + (f"  why: {reason}" if reason else ""))
     lines.append(f"TIMELINE: {len(ev_rows)} events")
     for e in ev_rows:
         subj = e["subject_tube_ids"] or []

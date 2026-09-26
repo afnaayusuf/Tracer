@@ -389,6 +389,27 @@
       "default": false,
       "title": "Reflection Suspect",
       "type": "boolean"
+    },
+    "quality": {
+      "default": "ok",
+      "enum": [
+        "ok",
+        "low"
+      ],
+      "title": "Quality",
+      "type": "string"
+    },
+    "quality_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Quality Reason"
     }
   },
   "required": [

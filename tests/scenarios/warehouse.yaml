@@ -1,0 +1,20 @@
+# Acceptance scenario for the warehouse clip (HI_DEF_VIDEO.mp4). Fill `expected` from ground truth:
+# what a person watching the clip would answer. bench/scenario_eval.py scores the agent against it.
+clip: HI_DEF_VIDEO.mp4
+ground_truth:
+  people_total: null          # e.g. 10
+  people_at_conveyor: null    # e.g. 2
+  notes: null
+questions:
+  - q: How many distinct people were in this episode, and which of them stayed the whole time?
+    must_mention: []          # e.g. ["10"]
+    must_not_mention: ["14"]  # counting brief sightings as people is wrong
+    must_cite_prefix: ["cam1:E"]
+  - q: Who was at the conveyor on the right, and when did they arrive?
+    must_mention: []
+    must_cite_prefix: ["cam1:E"]
+  - q: Did anyone pick something up from a shelf?
+    must_mention: ["no"]      # nothing was picked up in this clip
+    must_cite_prefix: []
+    expect_uncited_ok: true
+latency_budget_ms: 10000

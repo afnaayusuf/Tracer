@@ -399,10 +399,10 @@ cases:
   status: planned
 - id: E-AGT-04
   ring: agent
-  title: Fuzzy time expressions
-  trigger: '"yesterday afternoon", "after lunch".'
-  handling: Resolve to explicit local window; echo it in the answer.
-  status: planned
+  title: Fuzzy time expressions and guessed vocabulary
+  trigger: '"yesterday afternoon", "after lunch"; the model invents event names like pick_up.'
+  handling: Event and zone vocabularies are in the system prompt; tool args are validated and a miss returns the valid list so the model corrects itself; time windows are echoed in answers.
+  status: implemented
 - id: E-AGT-05
   ring: agent
   title: Color question on IR footage

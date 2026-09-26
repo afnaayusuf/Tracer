@@ -52,7 +52,7 @@ def load_episode_file(engine: Engine, path: str | Path) -> dict:
                                   state=t.state.value, born_ms=t.born.corrected_ms(), last_seen_ms=t.last_seen.corrected_ms(),
                                   box=t.box.model_dump(), zone_ids=t.zone_ids, modality=t.modality.value,
                                   keyframe_refs=t.keyframe_refs, attributes=t.attributes.model_dump(mode="json") if t.attributes else None,
-                                  merge_candidates=t.merge_candidates))
+                                  merge_candidates=t.merge_candidates, quality=t.quality, quality_reason=t.quality_reason))
         elif isinstance(rec, EpisodeClose):
             close = rec
     if header is None:
@@ -61,8 +61,11 @@ def load_episode_file(engine: Engine, path: str | Path) -> dict:
     for r in tube_rows:
         e = ent_rows.setdefault(r["entity_id"], dict(entity_id=r["entity_id"], camera_id=r["camera_id"], named=r["named"],
                                                      class_label=r["class_label"], tube_ids=[], first_seen_ms=r["born_ms"],
-                                                     last_seen_ms=r["last_seen_ms"], best_keyframe_ref=None, embedding=None))
+                                                     last_seen_ms=r["last_seen_ms"], best_keyframe_ref=None, embedding=None,
+                                                     quality="low"))
         e["tube_ids"].append(r["tube_id"])
+        if r.get("quality", "ok") == "ok":
+            e["quality"] = "ok"                     # an entity is confirmed if any of its tubes is
         e["first_seen_ms"] = min(e["first_seen_ms"], r["born_ms"])
         e["last_seen_ms"] = max(e["last_seen_ms"], r["last_seen_ms"])
         if e["best_keyframe_ref"] is None and r["keyframe_refs"]:

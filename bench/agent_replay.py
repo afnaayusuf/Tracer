@@ -24,6 +24,7 @@ def main() -> None:
     ap.add_argument("--backend", choices=["fake", "openai", "transformers"], default="fake")
     ap.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--no-inline-script", action="store_true", help="A/B: fetch the script through a tool turn instead")
     a = ap.parse_args()
     engine = connect(a.db)
     loaded = [load_episode_file(engine, p) for p in a.paths]
@@ -57,18 +58,22 @@ def main() -> None:
                 print(f"[agent] transformers backend failed ({type(e).__name__}: {str(e)[:120]}); using fake backend")
                 backend = FakeBackend()
         for q in a.ask:
-            res = ask(engine, q, ep, backend)
+            res = ask(engine, q, ep, backend, inline_script=not a.no_inline_script)
             answers.append(res)
             calls = [f"{t['tool']}({', '.join(f'{k}={v}' for k, v in t['args'].items())}) -> "
                      + (f"ERROR {t['error'][:80]}" if t.get('error') else str(t['results'])) for t in res["trace"] if "tool" in t]
-            print(f"\nQ: {q}\n   tools: " + " | ".join(calls))
+            lat = res["latency"]
+            print(f"\nQ: {q}\n   latency: {lat['total_ms'] / 1000:.1f}s total (model {lat['model_ms'] / 1000:.1f}s, tools {lat['tool_ms']}ms, "
+                  f"{lat['turns']} turn(s), first prompt {lat['first_prompt_chars']} chars)\n   tools: " + (" | ".join(calls) or "none"))
             f = res["final"]
             if f["action"] == "answer":
                 print(f"   A ({f.get('confidence', 0):.2f}{'' if f['cited'] else ', UNCITED'}): {f['text']}\n   cites: {', '.join(f['citations']) or '—'}")
             else:
                 print(f"   clarify: {f['question']}")
         row["answers"] = [{"q": r["question"], "steps": r["steps"], "cited": r["final"].get("cited"),
-                           "action": r["final"]["action"], "backend": r["backend"]} for r in answers]
+                           "action": r["final"]["action"], "backend": r["backend"], **r["latency"]} for r in answers]
+        row["latency_p50_ms"] = int(sorted(r["latency"]["total_ms"] for r in answers)[len(answers) // 2])
+        row["latency_max_ms"] = max(r["latency"]["total_ms"] for r in answers)
     out = Path("data/bench"); out.mkdir(parents=True, exist_ok=True)
     with (out / "agent.jsonl").open("a") as f:
         f.write(json.dumps(row) + "\n")
