@@ -171,3 +171,14 @@ def test_script_separates_confirmed_people_from_brief_sightings(tmp_path, episod
     load_episode_file(engine, episode_path)
     ep = search_events(engine)[0]["episode_id"]
     assert "confirmed entities" in get_script(engine, ep, cache=False)
+
+
+def test_think_blocks_are_stripped_and_unknown_args_dropped(episode_path):
+    from vi.agent import extract_json
+    from vi.agent.loop import ToolStep, run_tool
+    assert extract_json('<think>\nlet me reason...\n{"not": "this"}\n</think>\n{"action":"clarify","question":"which?"}') \
+        == '{"action":"clarify","question":"which?"}'
+    engine = connect()
+    load_episode_file(engine, episode_path)
+    out = run_tool(engine, ToolStep(tool="search_events", args={"episode_id": "ep_x", "event_type": "pickup", "bogus": 1}))
+    assert out[0]["note"].startswith("ignored unknown args") and "episode_id" in out[0]["note"] and len(out) == 2

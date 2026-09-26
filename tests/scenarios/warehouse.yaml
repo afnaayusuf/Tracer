@@ -1,20 +1,35 @@
-# Acceptance scenario for the warehouse clip (HI_DEF_VIDEO.mp4). Fill `expected` from ground truth:
-# what a person watching the clip would answer. bench/scenario_eval.py scores the agent against it.
+# Acceptance scenario for the warehouse clip (HI_DEF_VIDEO.mp4, 17 s, 6 fps, 1280x720).
+# Ground truth established by watching the clip (session 16b). bench/scenario_eval.py scores the
+# agent against it; a mention rule given as a list means "any of these".
 clip: HI_DEF_VIDEO.mp4
 ground_truth:
-  people_total: null          # e.g. 10
-  people_at_conveyor: null    # e.g. 2
-  notes: null
+  people_total: 8
+  people_whole_time: 6
+  people_at_table: 5
+  people_right_side: 3
+  people_at_conveyor: 2
+  pickups: 0
+  notes: |
+    Table, whole clip: dark jacket + orange vest (near-left); orange vest, black hair (near-left);
+    woman, orange vest over dark top (far-left end); white hard hat + orange vest + blue jeans
+    (far side, moves right behind boxes ~6 s); pink/dark cap + orange vest (right of table at 0 s,
+    far-middle by 8 s). Right side: yellow-green hi-vis + white hard hat at the conveyor 0-17 s;
+    second hi-vis worker, dark cap, beside him at 0 s, walks along the conveyor ~8 s; dark jacket +
+    orange vest walking boxes in the dock aisle top-right, first visible ~4 s, in and out after.
+    Hanging jackets on the far-left racking are NOT people (false "person" detections there).
 questions:
   - q: How many distinct people were in this episode, and which of them stayed the whole time?
-    must_mention: []          # e.g. ["10"]
-    must_not_mention: ["14"]  # counting brief sightings as people is wrong
+    must_mention: [["8", "eight", "7", "seven", "9", "nine"]]     # 8, ±1 tolerance while ReID matures
+    must_not_mention: ["14", "13", "12", "11"]
     must_cite_prefix: ["cam1:E"]
   - q: Who was at the conveyor on the right, and when did they arrive?
-    must_mention: []
+    must_mention: [["00:0", "start", "beginning", "0.0", "from the first"]]   # the hard-hat worker is there from 0 s
+    must_not_mention: []
     must_cite_prefix: ["cam1:E"]
+    later: ["hard hat", "hi-vis"]       # becomes must_mention once the writer VLM supplies attributes
   - q: Did anyone pick something up from a shelf?
-    must_mention: ["no"]      # nothing was picked up in this clip
+    must_mention: [["no", "none", "nothing", "did not", "didn't", "not"]]
+    must_not_mention: ["yes, "]
     must_cite_prefix: []
     expect_uncited_ok: true
 latency_budget_ms: 10000

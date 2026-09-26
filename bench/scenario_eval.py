@@ -16,12 +16,19 @@ from vi.agent import FakeBackend, OpenAIBackend, TransformersBackend, ask, searc
 from vi.store import connect
 
 
+def _mentioned(rule, text: str) -> bool:
+    """a string must appear; a list means any of its strings must appear"""
+    if isinstance(rule, list):
+        return any(str(r).lower() in text for r in rule)
+    return str(rule).lower() in text
+
+
 def score(res: dict, spec: dict, budget_ms: int) -> dict:
     f = res["final"]
     text = (f.get("text") or f.get("question") or "").lower()
     checks = {
         "answered": f["action"] == "answer",
-        "mentions": all(m.lower() in text for m in spec.get("must_mention", []) or []),
+        "mentions": all(_mentioned(m, text) for m in spec.get("must_mention", []) or []),
         "avoids": not any(m.lower() in text for m in spec.get("must_not_mention", []) or []),
         "cites": (f.get("cited", False) or spec.get("expect_uncited_ok", False))
                  and all(any(c.startswith(p) for c in f.get("citations", [])) for p in spec.get("must_cite_prefix", []) or []),

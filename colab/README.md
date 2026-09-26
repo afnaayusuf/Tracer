@@ -46,3 +46,11 @@ bash colab/vllm_venv.sh start Qwen/Qwen3.5-4B      # installs once per runtime, 
 python bench/agent_replay.py --db "$DB_URL" data/episodes/*.jsonl --backend openai --ask "..."
 bash colab/vllm_venv.sh stop
 ```
+
+## After a runtime reset (checklist)
+
+1. Runtime → Change runtime type → **L4 GPU** (a fresh runtime defaults to CPU; the preflight line
+   then shows `torch ...+cpu` and `cuda_available: false`).
+2. Run the env cell (GH_TOKEN, GH_REPO). Without it the session commits locally but cannot push.
+3. Re-upload the clip to `/content/HI_DEF_VIDEO.mp4` (or set SOURCE) — `/content` is wiped on reset.
+4. Run the session script. Postgres and the vLLM venv are rebuilt automatically (a few minutes).

@@ -39,18 +39,40 @@ make_venv() {
   return 1
 }
 
+driver_cuda() {  # e.g. 12.8 from nvidia-smi; the torch build must not be newer than this
+  nvidia-smi 2>/dev/null | grep -oE "CUDA Version: [0-9]+\.[0-9]+" | grep -oE "[0-9]+\.[0-9]+" | head -1
+}
+
 install_vllm() {
-  "$VENV/bin/python" -c "import vllm" 2>/dev/null && return 0
-  echo "-- installing vllm into the venv (isolated torch; 3-6 min)"
+  if "$VENV/bin/python" -c "import vllm" 2>/dev/null; then
+    have="$("$VENV/bin/python" -c "import torch; print(torch.version.cuda or '')" 2>/dev/null)"
+    drv="$(driver_cuda)"
+    if [ -n "$have" ] && [ -n "$drv" ] && [ "$(printf '%s\n%s\n' "$drv" "$have" | sort -V | tail -1)" != "$drv" ]; then
+      echo "-- venv torch is cu$have but the driver supports $drv: reinstalling for this driver"
+      rm -rf "$VENV"; make_venv || return 1
+    else
+      return 0
+    fi
+  fi
+  drv="$(driver_cuda)"
+  backend="${VLLM_TORCH_BACKEND:-auto}"
+  echo "-- installing vllm into the venv (driver CUDA ${drv:-?}, torch backend $backend; 3-6 min)"
+  if command -v uv >/dev/null 2>&1 && uv pip install --python "$VENV/bin/python" -q --torch-backend="$backend" vllm >/tmp/vllm_install.log 2>&1; then echo "   ok (uv, torch-backend=$backend)"; return 0; fi
+  echo "   uv with --torch-backend failed: $(tail -1 /tmp/vllm_install.log | cut -c1-120)"
   if command -v uv >/dev/null 2>&1 && uv pip install --python "$VENV/bin/python" -q vllm >/tmp/vllm_install.log 2>&1; then echo "   ok (uv)"; return 0; fi
   if "$VENV/bin/python" -m pip install -q vllm >/tmp/vllm_install.log 2>&1; then echo "   ok (pip)"; return 0; fi
   echo "   failed: $(tail -2 /tmp/vllm_install.log | tr '\n' ' ')"; return 1
+}
+
+root_cause() {  # the informative lines of a failed vLLM start, not its last twelve
+  grep -iE "error|cuda|driver|out of memory|no kernel image|not supported|Traceback" "$LOG" | grep -v "TracerWarning" | head -12 | cut -c1-200
 }
 
 make_venv || { echo "could not create a virtualenv by any method"; exit 1; }
 if [ "$cmd" = venv ]; then "$VENV/bin/python" -c "import sys; print('   venv python', sys.version.split()[0])"; exit 0; fi
 install_vllm || exit 1
 "$VENV/bin/python" -c "import vllm, torch; print('   vllm', vllm.__version__, 'torch', torch.__version__, 'cuda', torch.version.cuda)" || exit 1
+echo "   driver CUDA $(driver_cuda)"
 pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true
 nohup "$VENV/bin/python" -m vllm.entrypoints.openai.api_server --model "$MODEL" --port "$PORT" \
   --max-model-len 16384 --gpu-memory-utilization "${VLLM_GPU_UTIL:-0.6}" --dtype bfloat16 --max-num-seqs 4 \
@@ -63,4 +85,4 @@ for i in $(seq 1 120); do
   if ! pgrep -f "vllm.entrypoints.openai.api_server" >/dev/null; then echo "   server exited; log tail:"; tail -12 "$LOG"; exit 1; fi
   sleep 5
 done
-echo "   server did not come up in 10 min; log tail:"; tail -12 "$LOG"; exit 1
+echo "   server did not come up in 10 min; root cause:"; root_cause; exit 1

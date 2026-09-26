@@ -124,19 +124,27 @@ class OpenAIBackend:
             return json.loads(r.read().decode())
 
     def complete(self, messages: list[dict], schema: dict) -> str:
-        base = {"model": self.model, "messages": messages, "temperature": self.temperature, "max_tokens": self.max_tokens}
+        base = {"model": self.model, "messages": messages, "temperature": self.temperature, "max_tokens": self.max_tokens,
+                "chat_template_kwargs": {"enable_thinking": False}}      # Qwen3.x: no reasoning preamble before the JSON
         try:
             out = self._post({**base, "response_format": {"type": "json_schema", "json_schema": {"name": "agent_step", "schema": schema}}})
         except Exception:
-            out = self._post({**base, "guided_json": schema})
+            try:
+                out = self._post({**base, "guided_json": schema})
+            except Exception:
+                base.pop("chat_template_kwargs", None)                   # servers that reject the field
+                out = self._post({**base, "guided_json": schema})
         return extract_json(out["choices"][0]["message"]["content"])
 
 
+THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
 def extract_json(text: str) -> str:
-    """Take the first balanced {...} object out of a model reply (code fences, prose, and
-    trailing text are all tolerated). Returns the raw text if none is found, so validation
-    fails loudly rather than silently."""
-    t = text.strip()
+    """Take the first balanced {...} object out of a model reply (think blocks, code fences,
+    prose, and trailing text are all tolerated). Returns the raw text if none is found, so
+    validation fails loudly rather than silently."""
+    t = THINK_RE.sub("", text).strip()
     if t.startswith("```"):
         t = t.strip("`")
         t = t[4:] if t.lower().startswith("json") else t
@@ -166,7 +174,7 @@ class TransformersBackend:
 
     name = "transformers"
 
-    def __init__(self, model_id: str = "Qwen/Qwen3.5-4B", max_new_tokens: int = 600, device: str | None = None):
+    def __init__(self, model_id: str = "Qwen/Qwen3.5-4B", max_new_tokens: int = 400, device: str | None = None):
         import torch
         from transformers import AutoProcessor, AutoTokenizer
         self.torch = torch
@@ -194,8 +202,12 @@ class TransformersBackend:
     def complete(self, messages: list[dict], schema: dict) -> str:
         msgs = list(messages)
         msgs[0] = {**msgs[0], "content": msgs[0]["content"] + "\nReply with the JSON object only, no prose."}
-        inputs = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True,
-                                              return_tensors="pt", return_dict=True)
+        try:   # Qwen3.x templates: thinking is on by default and eats the whole token budget
+            inputs = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True,
+                                                  return_tensors="pt", return_dict=True, enable_thinking=False)
+        except TypeError:
+            inputs = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True,
+                                                  return_tensors="pt", return_dict=True)
         inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
         with self.torch.no_grad():
             out = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
@@ -207,7 +219,10 @@ class TransformersBackend:
 def run_tool(engine: Engine, step: ToolStep) -> Any:
     fn = {"search_events": T.search_events, "search_tubes": T.search_tubes, "search_entities": T.search_entities,
           "get_script": T.get_script, "clip": T.clip}[step.tool]
-    args = {k: v for k, v in step.args.items() if v is not None}
+    import inspect
+    allowed = set(inspect.signature(fn).parameters) - {"engine", "episode_id"} if step.tool != "get_script" else {"episode_id"}
+    dropped = [k for k in step.args if k not in allowed]
+    args = {k: v for k, v in step.args.items() if v is not None and k in allowed}
     if step.tool == "search_events" and args.get("event_type"):
         types = args["event_type"] if isinstance(args["event_type"], list) else [args["event_type"]]
         bad = [t for t in types if t not in EVENT_TYPES]
@@ -215,7 +230,10 @@ def run_tool(engine: Engine, step: ToolStep) -> Any:
             raise ValueError(f"unknown event_type {bad}; valid: {', '.join(EVENT_TYPES)}")
     if step.tool == "get_script":
         return fn(engine, args.get("episode_id", ""))
-    return fn(engine, **args)
+    result = fn(engine, **args)
+    if dropped and isinstance(result, list):
+        result = [{"note": f"ignored unknown args {dropped}"}] + result if result else [{"note": f"ignored unknown args {dropped}; no matches"}]
+    return result
 
 
 def _compact(result: Any, limit: int = 6000) -> str:
