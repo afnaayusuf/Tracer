@@ -1,0 +1,297 @@
+"""Long-running ingest, one or many cameras from one source:
+  * a single camera (a file, paced to wall clock with --realtime, or an RTSP URL), or
+  * a multiplexed NVR export (--grid RxC): every cell is a virtual camera; all cells of a frame are
+    detected in ONE batched call (R12, cross-camera batching), then tracked, linked, described and
+    compiled per camera; episodes are per camera and load into the store as they close.
+
+  python bench/run_ingest.py --source /content/mall_hour.mp4 --grid 4x4 --profile tier2_public --model medium \
+      --start-time "2026-09-27T10:00:00+05:30" --db "$DB_URL" --reid siglip --writer none --realtime
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+
+from vi.detect import dedupe_detections, full_frame_roi, remap_detections
+from vi.episode import EpisodeWriter, KeyframeStore, annotate, should_soft_cut
+from vi.events import EventCompiler, default_zones, load_zones
+from vi.gate import FrameDiffGate
+from vi.ingest import GridSpec, cell_ids, compose, label_zone, split
+from vi.ingest import VideoReader
+from vi.profiles import load_profile
+from vi.reid import HistogramEmbedder, crop_for_embedding, make_embedder
+from vi.schemas import Box, CamTime, Provenance, Tick, TubeSnapshot
+from vi.schemas.episode import CastMember, EpisodeStatus
+from vi.store import connect, load_episode_file
+from vi.tubes import TRACKERS, TubeLinker, grade_tube
+
+
+def parse_start(s: str | None) -> int:
+    if not s:
+        return int(time.time() * 1000)
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+@dataclass
+class Cam:
+    camera_id: str
+    tile_id: str
+    w: int = 0
+    h: int = 0
+    gate: object = None
+    tracker: object = None
+    compiler: object = None
+    linker: object = None
+    zones: list = field(default_factory=list)
+    media: list = field(default_factory=list)
+    ep: str | None = None
+    ep_t0: int = 0
+    ep_cast_prev: set = field(default_factory=set)
+    ep_tubes: list = field(default_factory=list)
+    last_live_ms: int | None = None
+    described: set = field(default_factory=set)
+    pending: dict = field(default_factory=dict)
+    pending_aux: dict = field(default_factory=dict)
+    current: dict = field(default_factory=lambda: {"frame": None})
+    last_annotated: np.ndarray | None = None
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--source", required=True, help="file path or rtsp:// url")
+    ap.add_argument("--db", default="sqlite+pysqlite:///data/vi.db")
+    ap.add_argument("--camera", default="cam1"); ap.add_argument("--tile", default="floor")
+    ap.add_argument("--grid", default=None, help="RxC: the frame is a grid of cameras (NVR multiplex)")
+    ap.add_argument("--grid-margin", type=int, default=0)
+    ap.add_argument("--start-time", default=None); ap.add_argument("--profile", default="common")
+    ap.add_argument("--model", default="nano"); ap.add_argument("--fps", type=float, default=4.0)
+    ap.add_argument("--threshold", type=float, default=0.1)
+    ap.add_argument("--reid", default="siglip"); ap.add_argument("--writer", choices=["none", "qwen", "fake"], default="none")
+    ap.add_argument("--writer-model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--zones", default=None, help="zones JSON (single camera); grid cameras get border exits + label media zones")
+    ap.add_argument("--episode-min", type=float, default=10.0); ap.add_argument("--quiet-close-s", type=float, default=30.0)
+    ap.add_argument("--realtime", action="store_true"); ap.add_argument("--max-minutes", type=float, default=0)
+    ap.add_argument("--max-width", type=int, default=0, help="decode width cap (0 = native); grids need native resolution")
+    ap.add_argument("--out", default="data/episodes")
+    ap.add_argument("--live-dir", default="data/live"); ap.add_argument("--live-every", type=int, default=4)
+    a = ap.parse_args()
+
+    profile = load_profile(a.profile)
+    tube_classes = set(profile.tube_classes)
+    start_ms = parse_start(a.start_time)
+    engine = connect(a.db)
+    prov = Provenance(kb_version=1, pipeline_git="run_ingest")
+    spec = GridSpec.parse(a.grid, a.grid_margin) if a.grid else None
+    n_cams = spec.n if spec else 1
+    reader = VideoReader(a.camera, a.source, target_fps=a.fps, max_width=(a.max_width or (1920 if spec else 640)), want_rgb=True)
+    if a.model == "fake":
+        from vi.detect.fake import BrightBlobDetector
+        det = BrightBlobDetector(threshold=a.threshold, batch_size=n_cams)
+    else:
+        from vi.detect.rfdetr import RFDETRDetector
+        det = RFDETRDetector(size=a.model, threshold=a.threshold, batch_size=n_cams)
+    kf = KeyframeStore(Path(a.out).parent / "keyframes")
+    embedder = make_embedder(a.reid) if a.reid != "none" else None
+    aux = HistogramEmbedder() if embedder and embedder.name != "hist" else None
+    vlm = None
+    if a.writer == "qwen":
+        try:
+            from vi.writer import WriterVLM
+            vlm = WriterVLM(model_id=a.writer_model); print(f"[writer] {a.writer_model} loaded", flush=True)
+        except Exception as e:
+            print(f"[writer] unavailable ({type(e).__name__}: {str(e)[:80]})", flush=True)
+    elif a.writer == "fake":
+        from vi.writer.contact_sheet import parse_sheet_reply
+        class _F:
+            calls = 0; last_ms = 0.0
+            def describe(self, crops, ids, modality=None):
+                self.calls += 1
+                return parse_sheet_reply(json.dumps([{"cell_id": i, "top_color": "orange", "description": "person", "confidence": 0.7} for i in range(len(ids))]), ids)
+        vlm = _F()
+    writer = EpisodeWriter(a.out)
+    ids = cell_ids(spec) if spec else [a.camera]
+    cams = {cid: Cam(camera_id=cid, tile_id=(cid if spec else a.tile)) for cid in ids}
+    tick_ms = int(1000 / a.fps)
+    frames = 0; t_wall0 = time.time(); pts0 = None
+    stats: Counter = Counter()
+    detect_ms: list[float] = []
+
+    def init_cam(cam: Cam, w: int, h: int) -> None:
+        cam.w, cam.h = w, h
+        if spec:
+            cam.zones = [z for z in default_zones(cam.camera_id, w, h, tile_id=cam.tile_id) if z.kind == "exit"]
+            cam.zones.append(label_zone(spec, w, h, cam.camera_id, cam.tile_id))
+        else:
+            zp = a.zones or (str(Path("data/zones") / (Path(a.source).stem + ".json")) if (Path("data/zones") / (Path(a.source).stem + ".json")).exists() else None)
+            cam.zones = load_zones(zp, cam.camera_id) if zp else default_zones(cam.camera_id, w, h, tile_id=cam.tile_id)
+        cam.media = [z for z in cam.zones if z.kind == "media"]
+        exits = [Box(x1=min(p[0] for p in z.polygon), y1=min(p[1] for p in z.polygon), x2=max(p[0] for p in z.polygon), y2=max(p[1] for p in z.polygon))
+                 for z in cam.zones if z.kind == "exit"]
+        cam.gate = FrameDiffGate(cam.camera_id)
+        cam.tracker = TRACKERS["byte"](cam.camera_id, exit_boxes=exits, keyframe_sink=kf.make_sink(lambda c=cam: c.current["frame"]))
+        cam.compiler = EventCompiler(cam.camera_id, cam.zones, enter_ticks=1, exit_ticks=2, dwell_ms=5000, tile_id=cam.tile_id)
+        cam.linker = TubeLinker(cam.camera_id) if embedder else None
+
+    def close_episode(cam: Cam, t_end_ms: int, status: EpisodeStatus) -> None:
+        if cam.ep is None:
+            return
+        heights = sorted(t.max_height_px for t in cam.ep_tubes if t.class_label == "person" and t.max_height_px > 0)
+        med = heights[len(heights) // 2] if heights else None
+        for t in cam.ep_tubes:
+            if cam.linker is not None and t.class_label == "person":
+                t.entity_id = cam.linker.entity_of(t.tube_id) or t.entity_id
+            grade_tube(t, cam.w, cam.h, median_height_px=med, min_life_ms=int(profile.quality.min_life_s * 1000),
+                       min_height_frac=profile.quality.min_height_frac, border_px=profile.quality.border_px)
+            writer.write_tube(cam.ep, t)
+        cast = [CastMember(entity_id=t.entity_id, tube_ids=[t.tube_id], class_label=t.class_label, best_keyframe_ref=(t.keyframe_refs or [None])[0]) for t in cam.ep_tubes]
+        writer.close(cam.ep, CamTime(cam_utc_ms=t_end_ms), status, cast)
+        counts = load_episode_file(engine, writer.path(cam.ep))
+        stats["episodes"] += 1
+        print(f"[episode] {cam.camera_id} {cam.ep} {status.value} {len(cam.ep_tubes)} tubes -> store tubes={counts['tubes']} events={counts['events']}", flush=True)
+        cam.ep, cam.ep_tubes, cam.ep_cast_prev = None, [], set()
+
+    def step_cam(cam: Cam, rgb: np.ndarray, gray: np.ndarray, pts_ms: int, t_ms: int, dets: list) -> None:
+        cam.current["frame"] = rgb
+        g = cam.gate.update(gray, pts_ms)
+        events = cam.compiler.on_gate(g)
+        dets = dedupe_detections([d for d in dets if d.class_label in tube_classes])
+        if cam.media:
+            dets = [d for d in dets if not any(z.contains(d.box.foot_point()) for z in cam.media)]
+        live, closed = cam.tracker.update(dets, t_ms, det_source="heartbeat")
+        if cam.ep is None and live:
+            cam.ep = writer.open(cam.tile_id, [cam.camera_id], CamTime(cam_utc_ms=t_ms), prov); cam.ep_t0 = t_ms
+            cam.compiler = EventCompiler(cam.camera_id, cam.zones, enter_ticks=1, exit_ticks=2, dwell_ms=5000, tile_id=cam.tile_id)
+        if live:
+            cam.last_live_ms = t_ms
+        if cam.linker is not None:
+            due = [t for t in live if t.class_label == "person" and t.tube_id not in cam.pending and t.tube_id not in cam.described and cam.linker.entity_of(t.tube_id) is None]
+            if due:
+                crops = [crop_for_embedding(rgb, t.box) for t in due]
+                embs = embedder.embed(crops); auxs = aux.embed(crops) if aux else [None] * len(crops)
+                for t, e, ax in zip(due, embs, auxs):
+                    cam.pending[t.tube_id] = e
+                    if ax is not None: cam.pending_aux[t.tube_id] = ax
+            for t in live:
+                if t.class_label == "person" and t.tube_id not in cam.pending: cam.linker.on_state(t, t_ms)
+            for t in live:
+                if t.tube_id in cam.pending and t.state.value == "active":
+                    ev = cam.linker.on_birth(t, cam.pending.pop(t.tube_id), t_ms, cam.pending_aux.pop(t.tube_id, None))
+                    if ev is not None: events.append(ev); stats["relinks"] += 1
+            live_ids = {t.tube_id for t in live}
+            for tid in [k for k in cam.pending if k not in live_ids]:
+                cam.pending.pop(tid); cam.pending_aux.pop(tid, None)
+            for ghost in cam.linker.absorbed:
+                dead = cam.tracker.drop(ghost)
+                if dead is not None: closed.append(dead)
+            cam.linker.absorbed.clear()
+            live = [t for t in live if t.tube_id in cam.tracker._tracks]
+            for t in closed:
+                mev = cam.linker.on_close(t, t_ms)
+                if mev is not None: events.append(mev); stats["merges"] += 1
+            for t in live:
+                if t.class_label == "person": t.entity_id = cam.linker.entity_of(t.tube_id)
+        if vlm is not None and frames % 4 == 0:
+            todo = [t for t in live if t.class_label == "person" and t.state.value == "active" and t.tube_id not in cam.described][:8]
+            if todo:
+                res = vlm.describe([crop_for_embedding(rgb, t.box, pad=0.15) for t in todo], [t.tube_id for t in todo])
+                if res is not None:
+                    by = {c.tube_id: c.attributes for c in res.cells}
+                    for t in todo:
+                        if t.tube_id in by and by[t.tube_id].confidence > 0: t.attributes = by[t.tube_id]
+                for t in todo: cam.described.add(t.tube_id)
+                stats["sheets"] += 1
+        cam.ep_tubes += closed
+        if cam.ep is not None:
+            snaps = [TubeSnapshot(tube_id=t.tube_id, class_label=t.class_label, state=t.state, box=t.box,
+                                  det_source="detector" if t.state.value == "active" else "predicted") for t in live]
+            events += cam.compiler.on_tick(snaps, t_ms)
+            writer.write_tick(cam.ep, Tick(camera_id=cam.camera_id, tile_id=cam.tile_id, tick_index=frames, t_start=CamTime(cam_utc_ms=t_ms),
+                                           t_end=CamTime(cam_utc_ms=t_ms + tick_ms), tubes=snaps, event_ids=[e.event_id for e in events], provenance=prov))
+            for e in events:
+                writer.write_event(cam.ep, e); stats["events"] += 1
+            cast_now = {t.entity_id or t.tube_id for t in live if t.class_label == "person"}
+            quiet = cam.last_live_ms is not None and not live and t_ms - cam.last_live_ms > a.quiet_close_s * 1000
+            if quiet or should_soft_cut(cam.ep_cast_prev, cast_now, t_ms - cam.ep_t0, max_duration_ms=int(a.episode_min * 60_000)):
+                cam.ep_tubes += list(live)
+                close_episode(cam, t_ms, EpisodeStatus.closed if quiet else EpisodeStatus.soft_cut)
+            elif frames % 40 == 0:
+                cam.ep_cast_prev = cast_now
+        if a.live_every and frames % a.live_every == 0:
+            cam.last_annotated = annotate(rgb, [], dets, live, f"{cam.camera_id} {datetime.fromtimestamp(t_ms / 1000, timezone.utc).strftime('%H:%M:%S')}Z live {len(live)}", None)
+        cam_live[cam.camera_id] = len(live)
+
+    cam_live: dict[str, int] = {}
+    fr = None
+    for fr in reader.frames():
+        if pts0 is None:
+            pts0 = fr.pts_ms
+        if a.max_minutes and fr.pts_ms - pts0 > a.max_minutes * 60_000:
+            break
+        if a.realtime:
+            lag = (fr.pts_ms - pts0) / 1000 - (time.time() - t_wall0)
+            if lag > 0:
+                time.sleep(min(lag, 1.0))
+        t_ms = start_ms + fr.pts_ms
+        cells = split(fr.rgb, spec) if spec else [fr.rgb]
+        grays = [c.mean(axis=2).astype(np.uint8) for c in cells] if spec else [fr.gray]
+        for cid, cell in zip(ids, cells):
+            if cams[cid].tracker is None:
+                init_cam(cams[cid], cell.shape[1], cell.shape[0])
+        t0 = time.perf_counter()
+        batched = det.detect_batch(cells)                    # one call for every camera in the frame (R12)
+        detect_ms.append((time.perf_counter() - t0) * 1000)
+        for cid, cell, gray, dets in zip(ids, cells, grays, batched):
+            h, w = cell.shape[:2]
+            dets = remap_detections(list(dets), full_frame_roi(w, h), w, h)
+            step_cam(cams[cid], cell, gray, fr.pts_ms, t_ms, dets)
+        if a.live_every and frames % a.live_every == 0:
+            live_dir = Path(a.live_dir); live_dir.mkdir(parents=True, exist_ok=True)
+            from PIL import Image
+            panels = [cams[cid].last_annotated for cid in ids if cams[cid].last_annotated is not None]
+            if panels:
+                img = compose(panels, spec) if spec else panels[0]
+                Image.fromarray(img).save(live_dir / "latest.tmp.jpg", quality=80)
+                try:
+                    (live_dir / "latest.tmp.jpg").replace(live_dir / "latest.jpg")
+                except Exception:
+                    pass
+            (live_dir / "status.json").write_text(json.dumps({"frames": frames, "footage_s": round((fr.pts_ms - pts0) / 1000, 1),
+                                                              "wall_s": round(time.time() - t_wall0, 1), "cameras": n_cams,
+                                                              "live_tubes": sum(cam_live.values()), "per_camera": cam_live, "now_ms": t_ms,
+                                                              "episodes": stats["episodes"], "sheets": stats["sheets"],
+                                                              "detect_ms_p50": round(float(np.median(detect_ms[-50:])), 1) if detect_ms else None}))
+        frames += 1
+        if frames % 200 == 0:
+            el = time.time() - t_wall0
+            print(f"[ingest] {frames} frames x {n_cams} cams  footage {(fr.pts_ms - pts0)/1000:6.0f}s  wall {el:6.0f}s  "
+                  f"realtime x{((fr.pts_ms - pts0)/1000) / max(el, 1e-6):.2f}  detect {np.median(detect_ms[-50:]):.0f}ms/batch  live {sum(cam_live.values())}  {dict(stats)}", flush=True)
+    if fr is not None:
+        for cam in cams.values():
+            if cam.ep is not None:
+                cam.ep_tubes += [tr.tube for tr in cam.tracker._tracks.values()]
+                close_episode(cam, start_ms + fr.pts_ms + tick_ms, EpisodeStatus.closed)
+    footage_s = round((fr.pts_ms - (pts0 or 0)) / 1000, 1) if fr is not None else 0
+    wall = round(time.time() - t_wall0, 1)
+    row = {"ring": "ingest", "source": Path(a.source).name, "cameras": n_cams, "grid": a.grid, "model": a.model, "frames": frames,
+           "footage_s": footage_s, "wall_s": wall, "realtime_factor": round(footage_s / max(wall, 1e-6), 2),
+           "detect_ms_p50_per_batch": round(float(np.median(detect_ms)), 1) if detect_ms else None,
+           "camera_frames_per_s": round(frames * n_cams / max(wall, 1e-6), 1), **dict(stats),
+           "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    Path("data/bench").mkdir(parents=True, exist_ok=True)
+    with open("data/bench/ingest.jsonl", "a") as f:
+        f.write(json.dumps(row) + "\n")
+    print(json.dumps(row, indent=2))
+
+
+if __name__ == "__main__":
+    main()

@@ -355,6 +355,7 @@ def main() -> None:
         "writer": a.writer, "writer_calls": getattr(vlm_writer, "calls", 0) if vlm_writer else 0,
         "writer_ms_p50": round(float(np.median(writer_ms)), 1) if writer_ms else None,
         "tubes_described": sum(1 for t in tubes if t.attributes is not None),
+        "confirmed_entities": len({t.entity_id or t.tube_id for t in tubes if t.class_label == "person" and t.quality == "ok"}),
         "entities": linker.entities if linker else None, "relinks": linker.relinks if linker else None,
         "merges_on_death": linker.merges if linker else None,
         "ghosts_absorbed": absorbed_total if linker else None,

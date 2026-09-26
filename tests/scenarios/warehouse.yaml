@@ -23,6 +23,7 @@ questions:
     must_not_mention: ["14", "13", "12", "11"]
     must_cite_prefix: ["cam1:E", "ev_"]
     whole_time_recall: 0.8           # the cited entities must cover >= 80% of entities_present(min_coverage=0.9)
+    whole_time_count: [5, 7]         # ground truth: 6 people were present the whole clip (±1)
   - q: Who was at the conveyor on the right, and when did they arrive?
     must_mention: [["00:0", "start", "beginning", "0.0", "from the first", "already"]]   # the hard-hat worker is there from 0 s
     must_not_mention: []

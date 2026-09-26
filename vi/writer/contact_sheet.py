@@ -16,31 +16,37 @@ from vi.schemas.contact_sheet import CellResult, ContactSheetResult
 COLORS = ["black", "white", "gray", "red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "multicolor"]
 
 WRITER_PROMPT = (
-    "This image is a grid of numbered cells; each cell shows one person cropped from a camera. "
-    "For EVERY cell, describe that person only. Reply with a JSON array, one object per cell, no prose:\n"
-    '[{"cell_id": 0, "top_color": one of ' + str(COLORS) + ' or null, "bottom_color": same or null, '
+    "This image is a grid of cells; each cell shows one person cropped from a camera, with the cell number in the "
+    "yellow strip under it (the strip is a label, not part of the scene). For EVERY cell, describe that person only. "
+    "Reply with a JSON array, one object per cell, no prose:\n"
+    '[{"cell_id": 0, "top_color": colour of the most visible upper-body garment (a vest counts), one of ' + str(COLORS) + ' or null, '
+    '"bottom_color": same or null, '
     '"headwear": short text or null, "carried_item": short text or null, "role": short text or null, '
     '"description": at most 12 words, "confidence": 0-1}]\n'
     "Use null when a field is not visible. Cells are numbered top-left to bottom-right starting at 0."
 )
 
 
-def pack_sheet(crops: list[np.ndarray], cell: int = 224, cols: int = 4):
-    """Grid with hard borders and a number in each cell (E-FOV-04)."""
+def pack_sheet(crops: list[np.ndarray], cell: int = 224, cols: int = 4, caption: int = 22):
+    """Grid with hard borders and a number in a caption strip BELOW each crop, never over it (a badge
+    on top of a 30-px crop is what the model ends up describing). Small crops are upscaled to fill
+    the cell so the model sees a person, not a speck (E-FOV-04)."""
     from PIL import Image, ImageDraw
     n = len(crops)
     cols = min(cols, max(1, n))
     rows = (n + cols - 1) // cols
-    sheet = Image.new("RGB", (cols * cell, rows * cell), (20, 20, 20))
+    ch = cell + caption
+    sheet = Image.new("RGB", (cols * cell, rows * ch), (20, 20, 20))
     dr = ImageDraw.Draw(sheet)
     for i, c in enumerate(crops):
-        x, y = (i % cols) * cell, (i // cols) * cell
+        x, y = (i % cols) * cell, (i // cols) * ch
         im = Image.fromarray(np.ascontiguousarray(c)).convert("RGB")
-        im.thumbnail((cell - 12, cell - 28))
-        sheet.paste(im, (x + 6 + (cell - 12 - im.width) // 2, y + 22 + (cell - 28 - im.height) // 2))
+        scale = min((cell - 8) / max(1, im.width), (cell - 8) / max(1, im.height))   # up or down to fill the cell
+        im = im.resize((max(1, int(im.width * scale)), max(1, int(im.height * scale))), Image.LANCZOS)
+        sheet.paste(im, (x + 4 + (cell - 8 - im.width) // 2, y + 4 + (cell - 8 - im.height) // 2))
         dr.rectangle([x + 1, y + 1, x + cell - 2, y + cell - 2], outline=(255, 255, 255), width=2)
-        dr.rectangle([x + 3, y + 3, x + 40, y + 20], fill=(255, 215, 0))
-        dr.text((x + 8, y + 5), f"#{i}", fill=(0, 0, 0))
+        dr.rectangle([x, y + cell, x + cell - 1, y + ch - 1], fill=(255, 215, 0))
+        dr.text((x + 6, y + cell + 4), f"cell #{i}", fill=(0, 0, 0))
     return sheet
 
 

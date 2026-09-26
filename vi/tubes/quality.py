@@ -23,7 +23,8 @@ def grade_tube(tube: Tube, frame_w: int, frame_h: int, median_height_px: float |
         reasons.append(f"height {int(h)}px < {int(floor)}px")
     if life < min_life_ms:
         pass
-    if b.x1 <= border_px or b.y1 <= border_px or b.x2 >= frame_w - border_px or b.y2 >= frame_h - border_px:
+    at_border = b.x1 <= border_px or b.y1 <= border_px or b.x2 >= frame_w - border_px or b.y2 >= frame_h - border_px
+    if at_border and life < 2 * min_life_ms:      # a brief flicker at the edge; a long tube that EXITS at the edge is a person
         reasons.append("at frame border")
     tube.quality = "low" if reasons else "ok"
     tube.quality_reason = ", ".join(reasons) or None

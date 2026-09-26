@@ -217,9 +217,10 @@ class TransformersBackend:
             self.tok = AutoProcessor.from_pretrained(model_id)
         except Exception:
             self.tok = AutoTokenizer.from_pretrained(model_id)
-        if warmup:   # CUDA context, kernels and cache allocation happen here, not inside the first question
-            try:
-                self.complete([{"role": "system", "content": "Reply with {}"}, {"role": "user", "content": "{}"}], {})
+        if warmup:   # CUDA context, kernel compilation (fused linear attention compiles per shape) and cache
+            try:     # allocation happen here at a realistic prompt length, not inside the first question
+                filler = "SCENE SCRIPT: " + ("cam1:E1 person unnamed seen 00:00.0–00:16.7 coverage 99%; " * 80)
+                self.complete([{"role": "system", "content": SYSTEM}, {"role": "user", "content": filler + "\nQuestion: how many people? Reply with {}"}], {})
             except Exception:
                 pass
 
@@ -458,3 +459,164 @@ def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int 
                         "first_prompt_chars": len(first),
                         "gen_tokens": getattr(backend, "last_gen_tokens", None), "tok_s": round(getattr(backend, "last_tok_s", 0.0), 1) or None,
                         "fused_kernels": getattr(backend, "fused", None)}}
+
+
+# ---------------------------------------------------------------- multi-episode, live-footage entry point
+WINDOW_TOOLS = {"count_entities", "entities_present", "coverage"}
+
+SYSTEM_LIVE_SUFFIX = """
+You are answering about recorded footage. FOOTAGE: {start}–{end} ({tz}); the latest processed moment is {now}.
+The scene script below covers only the window {ws}–{we}. If the question needs a different time, say which
+window you are answering about. If nothing in the window matches, say so plainly. Never guess names: people are
+unnamed unless the cast says otherwise; describe them from their `looks` instead. Counts carry an uncertainty of
+about ±1 person; say "about" for counts above 3. Do not speculate about what happened outside the footage.
+"""
+
+
+CAM_RE = re.compile(r"\b(?:cam(?:era)?)\s*-?\s*(\d{1,2})\b", re.I)
+
+
+def ground_camera(question: str, cameras: list[str]) -> str | None:
+    """'on cam 4' / 'camera 04' / 'CAM 12' -> the store's camera id with that number, if any."""
+    m = CAM_RE.search(question)
+    if not m or not cameras:
+        return None
+    n = int(m.group(1))
+    for c in cameras:
+        digits = re.sub(r"\D", "", c)
+        if digits and int(digits) == n:
+            return c
+    return None
+
+
+def _window_tool(engine: Engine, step: ToolStep, ws: int, we: int, camera_id: str | None = None) -> Any:
+    args = {k: v for k, v in step.args.items() if v is not None}
+    a = int(args.get("t_start_ms", ws)); b = int(args.get("t_end_ms", we))
+    a, b = max(ws, min(a, b)), min(we, max(a, b))
+    if step.tool == "count_entities":
+        return T.count_entities_window(engine, a, b, camera_id=camera_id)
+    if step.tool == "entities_present":
+        return T.entities_present_window(engine, a, b, float(args.get("min_coverage", 0.9)), camera_id=camera_id)
+    if step.tool == "coverage":
+        return T.coverage_window(engine, a, b, camera_id=camera_id)
+    return run_tool(engine, step, None)
+
+
+def ask_window(engine: Engine, question: str, backend, now_ms: int, tz_name: str = "UTC", max_steps: int = 6) -> dict:
+    """Live-footage question answering: scope check -> time grounding -> window script -> model loop
+    with window-aware numeric tools. Refusals and clarifications happen before any model call."""
+    t_start_total = time.perf_counter()
+    bounds = T.footage_bounds(engine)
+    if bounds is None:
+        return {"question": question, "final": {"action": "answer", "text": "No footage has been processed yet.", "citations": [], "cited": False},
+                "trace": [], "steps": 0, "latency": {"total_ms": 0}}
+    start_ms, end_ms = bounds
+    end_ms = max(end_ms, now_ms if now_ms else end_ms)
+    from .scope import classify
+    from .timeground import fmt, ground
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(tz_name)
+    kind, msg = classify(question)
+    if kind != "ok":
+        return {"question": question, "grounding": kind, "steps": 0, "trace": [],
+                "final": {"action": "answer", "text": msg, "citations": [], "cited": True, "handled_by": "scope"},
+                "latency": {"total_ms": round((time.perf_counter() - t_start_total) * 1000)}}
+    g = ground(question, now_ms or end_ms, start_ms, end_ms, tz_name)
+    if g.kind in ("future", "before_start"):
+        return {"question": question, "grounding": g.kind, "steps": 0, "trace": [],
+                "final": {"action": "answer", "text": g.message + f" I can answer about {fmt(start_ms, tz)}–{fmt(end_ms, tz)}.",
+                          "citations": [], "cited": True, "handled_by": "time"},
+                "latency": {"total_ms": round((time.perf_counter() - t_start_total) * 1000)}}
+    ws, we = (g.t_start_ms or start_ms), (g.t_end_ms or end_ms)
+    cameras = T.cameras_in_store(engine)
+    cam = ground_camera(question, cameras)
+    if CAM_RE.search(question) and cam is None and cameras:
+        return {"question": question, "grounding": "unknown_camera", "steps": 0, "trace": [],
+                "final": {"action": "answer", "text": f"There is no camera with that number. Cameras in the footage: {', '.join(cameras)}.",
+                          "citations": [], "cited": True, "handled_by": "scope"},
+                "latency": {"total_ms": round((time.perf_counter() - t_start_total) * 1000)}}
+    script = T.window_script(engine, ws, we, tz_name, camera_id=cam)
+    seen_ids: set[str] = set(ID_RE.findall(script))
+    system = SYSTEM + SYSTEM_LIVE_SUFFIX.format(start=fmt(start_ms, tz), end=fmt(end_ms, tz), tz=tz_name,
+                                                 now=fmt(now_ms or end_ms, tz), ws=fmt(ws, tz), we=fmt(we, tz))
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": f"SCENE SCRIPT:\n{script}\n\nQuestion: {question}"}]
+    trace: list[dict] = []
+    final: dict | None = None
+    model_ms = tool_ms = 0.0
+    for i in range(max_steps):
+        t0 = time.perf_counter()
+        raw = backend.complete(messages, STEP_SCHEMA)
+        model_ms += (time.perf_counter() - t0) * 1000
+        try:
+            step = step_adapter.validate_json(raw)
+        except ValidationError as e:
+            step = _salvage(raw)
+            if step is None:
+                messages += [{"role": "assistant", "content": raw},
+                             {"role": "user", "content": f"TOOL RESULT: invalid step ({e.errors()[0]['msg']}); reply with one valid JSON object."}]
+                trace.append({"step": i, "invalid": raw[:200], "reason": e.errors()[0]["msg"]}); continue
+            trace.append({"step": i, "salvaged": e.errors()[0]["msg"]})
+        messages.append({"role": "assistant", "content": raw})
+        if isinstance(step, ToolStep):
+            t0 = time.perf_counter()
+            try:
+                result = _window_tool(engine, step, ws, we, cam); text = _compact(result); err = None
+            except Exception as e:
+                result, text, err = None, f"error: {type(e).__name__}: {e}", str(e)
+            tool_ms += (time.perf_counter() - t0) * 1000
+            seen_ids.update(ID_RE.findall(text))
+            n = len(result) if isinstance(result, list) else (1 if result else 0)
+            trace.append({"step": i, "tool": step.tool, "args": step.args, "results": n, "error": err})
+            messages.append({"role": "user", "content": f"TOOL RESULT ({step.tool}, {n} item(s)):\n{text}"}); continue
+        if isinstance(step, ClarifyStep):
+            final = {"action": "clarify", "question": step.question}; break
+        valid = [c for c in step.citations if c in seen_ids]
+        invalid = [c for c in step.citations if c not in seen_ids]
+        already = any("revise" in t for t in trace)
+        # numeric claims against the window tools
+        issue = None
+        try:
+            if COUNT_Q_RE.search(question):
+                truth = T.count_entities_window(engine, ws, we, camera_id=cam)["count"]; nums = _numbers_in(step.text)
+                if nums and truth not in nums and all(abs(n - truth) > 1 for n in nums[:3]):
+                    issue = f"count_entities says {truth} confirmed people in this window (your answer implies {nums[:3]})."
+            if WHOLE_TIME_RE.search(question):
+                ep = T.entities_present_window(engine, ws, we, 0.9, camera_id=cam); truth_ids = set(ep["entity_ids"])
+                cited = {c for c in step.citations if re.search(r":E\d+$", c)}
+                if truth_ids and len(cited & truth_ids) < max(1, len(truth_ids) - 1):
+                    issue = f"entities_present(0.9) says {sorted(truth_ids)} stayed the whole window; you named {sorted(cited & truth_ids) or 'none'}."
+        except Exception:
+            issue = None
+        bad_claims = contradicted_event_claims_window(engine, ws, we, step.text)
+        if (issue or bad_claims) and not already:
+            m = issue or f"your answer mentions {bad_claims} but no such events exist in this window."
+            trace.append({"step": i, "revise": m}); messages.append({"role": "user", "content": "TOOL RESULT: " + m + " Answer again."}); continue
+        if invalid and not valid and not already:
+            trace.append({"step": i, "revise": "citations not in tool results", "invalid": invalid})
+            messages.append({"role": "user", "content": "TOOL RESULT: your citations do not appear in the script or tool results; cite only ids you were shown."}); continue
+        final = {"action": "answer", "text": step.text, "citations": valid, "rejected_citations": invalid, "confidence": step.confidence,
+                 "cited": bool(valid), "unsupported_event_claims": bad_claims, "numeric_issue": issue}
+        break
+    if final is None:
+        final = {"action": "answer", "text": "I could not complete this within the step budget.", "citations": [], "cited": False, "confidence": 0.0}
+    return {"question": question, "grounding": g.kind, "camera_id": cam, "window_ms": [ws, we], "window": f"{fmt(ws, tz)}–{fmt(we, tz)}" + (f" on {cam}" if cam else ""),
+            "backend": getattr(backend, "name", "?"), "steps": len(trace), "trace": trace, "final": final,
+            "latency": {"total_ms": round((time.perf_counter() - t_start_total) * 1000), "model_ms": round(model_ms), "tool_ms": round(tool_ms),
+                        "turns": sum(1 for t in trace if "tool" in t or "revise" in t or "invalid" in t) + 1, "first_prompt_chars": len(messages[1]["content"]),
+                        "gen_tokens": getattr(backend, "last_gen_tokens", None), "tok_s": round(getattr(backend, "last_tok_s", 0.0), 1) or None}}
+
+
+def contradicted_event_claims_window(engine: Engine, ws: int, we: int, text: str) -> list[str]:
+    neg = re.compile(r"\b(no|not|nobody|none|never|didn't|did not|wasn't|weren't|isn't|aren't|without)\b")
+    named: set[str] = set()
+    for sent in re.split(r"(?<=[.!?;])\s+", text.lower()):
+        if neg.search(sent):
+            continue
+        for et, words in EVENT_WORDS.items():
+            if any(w in sent for w in words):
+                named.add(et)
+    if not named:
+        return []
+    have = {e["type"] for e in T.search_events(engine, t_start_ms=ws, t_end_ms=we, limit=10000)}
+    return sorted(et for et in named if et not in have)

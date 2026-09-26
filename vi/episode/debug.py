@@ -12,7 +12,7 @@ COL = {"roi": (60, 200, 60), "full": (60, 160, 255), "det_roi": (255, 220, 40), 
 
 
 def annotate(frame_rgb: np.ndarray, rois: list[ROI], dets: list[Detection], tubes: list[Tube],
-             title: str, path: str | Path) -> Path | None:
+             title: str, path: str | Path | None):
     """Debug frame: crops (green; full frame blue), detections (yellow from crops, cyan from the
     full frame, dashed-ish by confidence label), tubes (red active, orange predicted, grey born)
     with id suffix and state. Opens in Colab's file browser; upload one to the chat to review."""
@@ -36,6 +36,8 @@ def annotate(frame_rgb: np.ndarray, rois: list[ROI], dets: list[Detection], tube
         dr.rectangle([b.x1, b.y1, b.x2, b.y2], outline=c, width=3)
         dr.text((b.x1 + 2, max(0, b.y1 - 12)), f"#{t.tube_id.split(':')[-1]} {t.state.value[:3]}", fill=c)
     dr.text((6, 6), title, fill=(255, 255, 255))
+    if path is None:
+        return np.asarray(im)                 # in-memory panel (live view composition)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     im.save(path, quality=85)

@@ -83,7 +83,7 @@ def main() -> None:
     a = ap.parse_args()
     work = Path(a.work); work.mkdir(parents=True, exist_ok=True)
     base = run_slice(Path(a.source), work / "base", a.slice_args, a.fps, 0, a.zones)
-    base_people = base.get("person_tubes", 0) - base.get("person_tubes_low_quality", 0)
+    base_people = base.get("confirmed_entities", base.get("person_tubes", 0) - base.get("person_tubes_low_quality", 0))
     rows, failures = [], []
     print(f"base: confirmed people {base_people}, entities {base.get('entities')}, events {sorted(base['events'])}")
     for v in [x.strip() for x in a.variants.split(",") if x.strip()]:
@@ -92,7 +92,7 @@ def main() -> None:
             r = run_slice(src, work / v, a.slice_args, extra.get("fps", a.fps), extra.get("skip_s", 0), a.zones)
         except Exception as e:
             print(f"  {v:15s} ERROR {str(e)[:120]}"); failures.append(v); continue
-        people = r.get("person_tubes", 0) - r.get("person_tubes_low_quality", 0)
+        people = r.get("confirmed_entities", r.get("person_tubes", 0) - r.get("person_tubes_low_quality", 0))
         new_events = sorted(set(r["events"]) - set(base["events"]))
         ok = abs(people - base_people) <= a.tolerance and not new_events
         rows.append({"variant": v, "people": people, "entities": r.get("entities"), "new_event_types": new_events, "pass": ok})

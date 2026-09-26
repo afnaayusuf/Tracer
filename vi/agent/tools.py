@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import time
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.engine import Engine
 
 from vi.store.db import entities, episodes, events, insert_ignore, scripts, tubes
@@ -233,3 +233,114 @@ def get_script(engine: Engine, episode_id: str, max_events: int = 400, cache: bo
         with engine.begin() as conn:
             insert_ignore(conn, scripts, [dict(episode_id=episode_id, text=text, rendered_at_ms=int(time.time() * 1000))])
     return text
+
+
+# ---------------------------------------------------------------- multi-episode (window) tools
+def footage_bounds(engine: Engine) -> tuple[int, int] | None:
+    with engine.connect() as conn:
+        row = conn.execute(select(func.min(episodes.c.t0_ms), func.max(func.coalesce(episodes.c.t1_ms, episodes.c.t0_ms)))).first()
+    return (int(row[0]), int(row[1])) if row and row[0] is not None else None
+
+
+def episodes_in(engine: Engine, t_start_ms: int, t_end_ms: int) -> list[dict]:
+    with engine.connect() as conn:
+        q = select(episodes).where(and_(episodes.c.t0_ms <= t_end_ms, func.coalesce(episodes.c.t1_ms, episodes.c.t0_ms) >= t_start_ms)).order_by(episodes.c.t0_ms)
+        return [dict(r._mapping) for r in conn.execute(q)]
+
+
+def cameras_in_store(engine: Engine) -> list[str]:
+    with engine.connect() as conn:
+        return sorted({r[0] for r in conn.execute(select(tubes.c.camera_id).distinct())})
+
+
+def coverage_window(engine: Engine, t_start_ms: int, t_end_ms: int, class_label: str = "person", confirmed_only: bool = True,
+                    camera_id: str | None = None) -> list[dict]:
+    """Per entity across episodes: seen interval clipped to the window and coverage of the window."""
+    span = max(1, t_end_ms - t_start_ms)
+    conds = [tubes.c.class_label == class_label, tubes.c.last_seen_ms >= t_start_ms, tubes.c.born_ms <= t_end_ms]
+    if camera_id:
+        conds.append(tubes.c.camera_id == camera_id)
+    with engine.connect() as conn:
+        rows = [dict(r._mapping) for r in conn.execute(select(tubes).where(and_(*conds)))]
+    by: dict[str, list[dict]] = {}
+    for r in rows:
+        by.setdefault(r["entity_id"], []).append(r)
+    out = []
+    for eid, rs in by.items():
+        ok = any(r.get("quality", "ok") == "ok" for r in rs)
+        if confirmed_only and not ok:
+            continue
+        ivs = sorted((max(t_start_ms, r["born_ms"]), min(t_end_ms, r["last_seen_ms"])) for r in rs)
+        covered, cur = 0, None
+        for a, b in ivs:
+            if cur is None or a > cur[1]:
+                if cur: covered += cur[1] - cur[0]
+                cur = [a, b]
+            else:
+                cur[1] = max(cur[1], b)
+        if cur: covered += cur[1] - cur[0]
+        attrs = next((r["attributes"] for r in rs if r.get("attributes")), None)
+        out.append({"entity_id": eid, "first_seen_ms": max(t_start_ms, min(r["born_ms"] for r in rs)),
+                    "last_seen_ms": min(t_end_ms, max(r["last_seen_ms"] for r in rs)), "coverage": round(covered / span, 3),
+                    "tubes": len(rs), "quality": "ok" if ok else "low", "cameras": sorted({r["camera_id"] for r in rs}),
+                    "looks": (attrs or {}).get("description") if attrs else None,
+                    "keyframe": next((k for r in rs for k in (r["keyframe_refs"] or [])), None)})
+    return sorted(out, key=lambda x: (-x["coverage"], x["first_seen_ms"]))
+
+
+def count_entities_window(engine: Engine, t_start_ms: int, t_end_ms: int, class_label: str = "person", camera_id: str | None = None) -> dict:
+    rows = coverage_window(engine, t_start_ms, t_end_ms, class_label, camera_id=camera_id)
+    return {"count": len(rows), "entity_ids": [r["entity_id"] for r in rows], "window_ms": [t_start_ms, t_end_ms], "camera_id": camera_id}
+
+
+def entities_present_window(engine: Engine, t_start_ms: int, t_end_ms: int, min_coverage: float = 0.9, class_label: str = "person",
+                            camera_id: str | None = None) -> dict:
+    rows = coverage_window(engine, t_start_ms, t_end_ms, class_label, camera_id=camera_id)
+    ids = [r["entity_id"] for r in rows if r["coverage"] >= min_coverage]
+    return {"min_coverage": min_coverage, "count": len(ids), "entity_ids": ids, "coverage": {r["entity_id"]: r["coverage"] for r in rows}}
+
+
+def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str = "UTC", max_chars: int = 7000,
+                  max_events: int = 120, camera_id: str | None = None) -> str:
+    """Compact script for a time window across episodes: absolute clock times, confirmed cast with
+    coverage and looks, then events inside the window (capped; counts by type when over the cap)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(tz_name)
+    def clock(ms: int) -> str:
+        return datetime.fromtimestamp(ms / 1000, tz).strftime("%H:%M:%S")
+    eps = episodes_in(engine, t_start_ms, t_end_ms)
+    if camera_id:
+        eps = [e for e in eps if camera_id in (e["camera_ids"] or [])]
+    all_cams = cameras_in_store(engine)
+    cast = coverage_window(engine, t_start_ms, t_end_ms, camera_id=camera_id)
+    lines = [f"WINDOW {clock(t_start_ms)}–{clock(t_end_ms)} ({(t_end_ms - t_start_ms) / 60000:.1f} min) | episodes {len(eps)} | "
+             + (f"camera {camera_id}" if camera_id else f"cameras {','.join(all_cams)}"),
+             f"CAST: {len(cast)} confirmed people in this window" + ("" if camera_id or len(all_cams) <= 1 else
+             " (entities are per camera; the same person on two cameras appears twice)")]
+    for c in cast:
+        lines.append(f"  {c['entity_id']}" + (f"  on {','.join(c['cameras'])}" if len(all_cams) > 1 else "")
+                     + f"  seen {clock(c['first_seen_ms'])}–{clock(c['last_seen_ms'])}  coverage {c['coverage']:.0%}"
+                     + (f"  looks: {c['looks']}" if c.get("looks") else "") + (f"  keyframe {c['keyframe']}" if c.get("keyframe") else ""))
+    ev_conds = [events.c.t_ms >= t_start_ms, events.c.t_ms <= t_end_ms]
+    if camera_id:
+        ev_conds.append(events.c.camera_id == camera_id)
+    with engine.connect() as conn:
+        evs = [dict(r._mapping) for r in conn.execute(select(events).where(and_(*ev_conds)).order_by(events.c.t_ms))]
+    tube_ent: dict[str, str] = {}
+    with engine.connect() as conn:
+        for r in conn.execute(select(tubes.c.tube_id, tubes.c.entity_id).where(and_(tubes.c.last_seen_ms >= t_start_ms, tubes.c.born_ms <= t_end_ms))):
+            tube_ent[r[0]] = r[1]
+    if len(evs) > max_events:
+        from collections import Counter
+        c = Counter(e["type"] for e in evs)
+        lines.append(f"TIMELINE: {len(evs)} events (showing the {max_events} most recent; totals by type: " + ", ".join(f"{k} {v}" for k, v in c.most_common()) + ")")
+        evs = evs[-max_events:]
+    else:
+        lines.append(f"TIMELINE: {len(evs)} events")
+    for e in evs:
+        who = ", ".join(f"{tube_ent.get(t, 'anon:' + t)}" for t in (e["subject_tube_ids"] or [])) or "—"
+        cam = f" {e['camera_id']:<6s}" if not camera_id and len(all_cams) > 1 else ""
+        lines.append(f"  {clock(e['t_ms'])}{cam}  {e['type']:<20s} zone {e['zone_id'] or '-':<14s} {who}  [{e['event_id']}]")
+    text = "\n".join(lines)
+    return text if len(text) <= max_chars else text[:max_chars] + "\n  ... (truncated)"

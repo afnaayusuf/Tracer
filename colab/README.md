@@ -54,3 +54,45 @@ bash colab/vllm_venv.sh stop
 2. Run the env cell (GH_TOKEN, GH_REPO). Without it the session commits locally but cannot push.
 3. Re-upload the clip to `/content/HI_DEF_VIDEO.mp4` (or set SOURCE) — `/content` is wiped on reset.
 4. Run the session script. Postgres and the vLLM venv are rebuilt automatically (a few minutes).
+
+## Live demo (one hour of footage + a question interface)
+
+```
+%%bash
+# 1) ingest (background; paced to the file's clock with --realtime, or as fast as possible without it)
+nohup python bench/run_ingest.py --source /content/hour.mp4 --start-time "2026-09-27T10:00:00+05:30" \
+  --db "$DB_URL" --profile tier4_industrial --reid siglip --writer qwen --episode-min 10 > /tmp/ingest.log 2>&1 &
+# 2) interface (share link printed)
+python ui/app.py --db "$DB_URL" --backend transformers --model Qwen/Qwen3.5-4B --tz Asia/Kolkata --share
+```
+Questions are grounded before any model call: future times, times before the footage, off-topic
+requests, device actions and identity-by-face requests are answered by the guards. Everything else
+gets a window script (absolute clock times) and window-aware numeric tools.
+
+## Backend + frontend (laptop browser -> HTTPS -> Colab)
+
+```
+%%bash
+cd /content/Tracer
+VI_DB="$DB_URL" VI_TZ=Asia/Kolkata bash colab/serve.sh start       # API on :8000 + the page at /, public URL printed
+# start the one-hour file as a live stream (paced to its own clock), from the API:
+curl -s -X POST http://127.0.0.1:8000/ingest/start -H 'Content-Type: application/json' \
+  -d '{"source":"/content/hour.mp4","start_time":"2026-09-27T10:00:00+05:30","realtime":true,"profile":"tier4_industrial","writer":"none"}'
+```
+Open the printed `https://….trycloudflare.com` on the laptop. Endpoints: `/health`, `POST /ask`, `/episodes`,
+`/events`, `/keyframes/<path>`, `/live/latest.jpg`, `POST /ingest/start|stop`, `/ingest/status`.
+Memory on an L4: ingest with `"writer":"qwen"` plus the 4B agent is ~19 GB; keep the writer off during a live hour
+or run the agent on the 2B.
+
+## A multiplexed NVR export (one video, a grid of cameras)
+
+Every cell becomes a virtual camera (`cam01`…`camNN`, row-major); all cells of a frame are detected in one
+batched call. Burned-in labels are media zones. Questions can name a camera ("on cam 4").
+
+```
+curl -s -X POST http://127.0.0.1:8000/ingest/start -H 'Content-Type: application/json' \
+  -d '{"source":"/content/mall_hour.mp4","grid":"4x4","model":"medium","profile":"tier2_public","start_time":"2026-09-27T10:00:00+05:30","realtime":true}'
+```
+Use `"model":"medium"` for grids: a 4x4 cell of a 1080p export is 480x270 and people are 30-60 px tall; medium's
+576-px input costs the same as nano on the L4 and sees them better. Watch `realtime_factor` in the ingest log:
+above 1.0 the sixteen cameras keep up with the clock.

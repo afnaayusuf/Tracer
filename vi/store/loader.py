@@ -84,6 +84,17 @@ def load_episode_file(engine: Engine, path: str | Path) -> dict:
         counts["patches"] += insert_ignore(conn, patches, patch_rows)
         counts["tubes"] += insert_ignore(conn, tubes, tube_rows)
         counts["entities"] += insert_ignore(conn, entities, list(ent_rows.values()))
+        for e in ent_rows.values():        # an entity that already exists (earlier episode) grows its span and tube list
+            cur = conn.execute(select(entities).where(entities.c.entity_id == e["entity_id"])).first()
+            if cur is not None:
+                cur = dict(cur._mapping)
+                merged_tubes = sorted(set((cur["tube_ids"] or []) + e["tube_ids"]))
+                if merged_tubes != (cur["tube_ids"] or []) or e["last_seen_ms"] > (cur["last_seen_ms"] or 0):
+                    conn.execute(update(entities).where(entities.c.entity_id == e["entity_id"]).values(
+                        tube_ids=merged_tubes, first_seen_ms=min(cur["first_seen_ms"], e["first_seen_ms"]),
+                        last_seen_ms=max(cur["last_seen_ms"], e["last_seen_ms"]),
+                        best_keyframe_ref=cur["best_keyframe_ref"] or e["best_keyframe_ref"],
+                        quality="ok" if "ok" in (cur.get("quality"), e.get("quality")) else "low"))
         counts["custody"] += insert_ignore(conn, custody, custody_rows)
     counts["episode_id"] = header.episode_id  # type: ignore[assignment]
     return dict(counts)

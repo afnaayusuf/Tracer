@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -54,7 +55,7 @@ def test_pack_sheet_numbers_cells():
     import numpy as np
     from vi.writer import pack_sheet
     sheet = pack_sheet([np.zeros((120, 40, 3), np.uint8)] * 5, cell=100, cols=3)
-    assert sheet.size == (300, 200)
+    assert sheet.size == (300, 2 * (100 + 22))      # two rows, each cell + caption strip
 
 
 def test_numeric_tools_and_whole_time_check(tmp_path):
@@ -92,3 +93,103 @@ def test_metamorphic_bench_runs_on_synthetic_with_fake_detector(tmp_path):
                          capture_output=True, text=True, cwd=".", env={**os.environ, "PYTHONPATH": os.getcwd()})
     assert out.returncode == 0, out.stdout[-800:] + out.stderr[-800:]
     assert "3/3 invariants hold" in out.stdout
+
+
+def test_time_grounding_and_scope_guards():
+    from datetime import datetime, timezone
+    from vi.agent import classify_scope, ground_time
+    start = int(datetime(2026, 9, 27, 10, 0, tzinfo=timezone.utc).timestamp() * 1000); end = start + 3600_000
+    assert ground_time("Who was at the door at 12:30?", end, start, end).kind == "future"
+    assert ground_time("What happened at 9:30?", end, start, end).kind == "before_start"
+    g = ground_time("How many people in the last 15 minutes?", end, start, end)
+    assert g.kind == "ok" and g.t_start_ms == end - 15 * 60_000
+    g = ground_time("What happened between 10:10 and 10:20?", end, start, end)
+    assert (g.t_start_ms - start, g.t_end_ms - start) == (10 * 60_000, 20 * 60_000)
+    assert ground_time("How many people were there?", end, start, end).kind == "none"
+    assert classify_scope("What's the weather?")[0] == "off_topic" and classify_scope("Lock the door")[0] == "act"
+    assert classify_scope("Who was at the conveyor?")[0] == "ok" and classify_scope("Who is he?")[0] == "identity"
+
+
+def test_ask_window_refuses_future_and_off_topic_without_a_model_call(tmp_path):
+    from vi.agent import ask_window
+    from vi.store import connect
+    from vi.ingest.synthetic import write_walk_clip
+    clip = write_walk_clip(tmp_path / "walk.mp4", seconds=8, fps=10)
+    db = f"sqlite+pysqlite:///{tmp_path / 'vi.db'}"
+    out = subprocess.run([sys.executable, "bench/run_ingest.py", "--source", str(clip), "--db", db, "--model", "fake", "--reid", "hist",
+                          "--writer", "fake", "--start-time", "2026-09-27T10:00:00+00:00", "--fps", "5", "--out", str(tmp_path / "ep")],
+                         capture_output=True, text=True, env={**os.environ, "PYTHONPATH": os.getcwd()})
+    assert out.returncode == 0, out.stderr[-1200:]
+    engine = connect(db)
+
+    class Never:
+        name = "never"
+        def complete(self, messages, schema):
+            raise AssertionError("the model must not be called for guarded questions")
+    now = int(datetime.fromisoformat("2026-09-27T10:00:10+00:00").timestamp() * 1000)
+    assert ask_window(engine, "Who was at the door at 15:00?", Never(), now)["grounding"] == "future"
+    assert ask_window(engine, "What's the weather like?", Never(), now)["grounding"] == "off_topic"
+    assert ask_window(engine, "Unlock the door", Never(), now)["grounding"] == "act"
+    from vi.agent import FakeBackend
+    r = ask_window(engine, "How many people in the last 5 seconds?", FakeBackend(), now)
+    assert r["grounding"] == "ok" and r["final"]["action"] == "answer" and r["window"]
+
+
+def test_ui_builds_without_launching(tmp_path):
+    pytest.importorskip("gradio")
+    import sys as _sys
+    _sys.argv = ["x"]
+    from ui.app import build
+    demo = build("sqlite+pysqlite:///:memory:", "fake", "fake", "UTC")
+    assert demo is not None
+
+
+def test_border_only_flags_brief_tubes():
+    from vi.tubes import grade_tube
+    from vi.schemas import Box, CamTime, Tube
+    long = Tube(tube_id="c1:0:1", camera_id="c1", class_label="person", born=CamTime(cam_utc_ms=0), last_seen=CamTime(cam_utc_ms=15000),
+                box=Box(x1=290, y1=80, x2=318, y2=200), max_height_px=120)
+    grade_tube(long, 320, 240)
+    assert long.quality == "ok"                                     # walked out through the edge after 15 s
+    brief = Tube(tube_id="c1:0:2", camera_id="c1", class_label="person", born=CamTime(cam_utc_ms=0), last_seen=CamTime(cam_utc_ms=2000),
+                 box=Box(x1=0, y1=80, x2=20, y2=200), max_height_px=120)
+    grade_tube(brief, 320, 240)
+    assert brief.quality == "low" and "border" in brief.quality_reason
+
+
+def test_grid_ingest_makes_a_camera_per_cell_and_camera_questions_ground(tmp_path):
+    import av
+    import numpy as np
+    from vi.agent import ask_window, FakeBackend, footage_bounds
+    from vi.store import connect
+    rng = np.random.default_rng(1)
+    path = tmp_path / "grid.mp4"; c = av.open(str(path), "w"); s = c.add_stream("mpeg4", rate=5); s.width, s.height, s.pix_fmt = 640, 480, "yuv420p"
+    for i in range(5 * 30):
+        t = i / 5
+        f = rng.normal(100, 3, (480, 640)).clip(0, 255).astype(np.uint8)
+        for (cx, cy) in [(0, 0), (320, 0), (0, 240), (320, 240)]:
+            f[cy + 4: cy + 20, cx + 250: cx + 316] = 240               # burned-in labels
+        if 3 <= t < 18:
+            x = 10 + int(((t - 3) / 15) * 260); f[80:200, x:x + 24] = 235            # cell 0 walker
+        if 10 <= t < 28:
+            x = 330 + int(((t - 10) / 18) * 260); f[320:440, x:x + 24] = 235        # cell 3 walker
+        for pk in s.encode(av.VideoFrame.from_ndarray(np.repeat(f[:, :, None], 3, axis=2), format="rgb24")): c.mux(pk)
+    for pk in s.encode(): c.mux(pk)
+    c.close()
+    db = f"sqlite+pysqlite:///{tmp_path / 'vi.db'}"
+    out = subprocess.run([sys.executable, "bench/run_ingest.py", "--source", str(path), "--grid", "2x2", "--db", db, "--model", "fake", "--reid", "hist",
+                          "--writer", "fake", "--start-time", "2026-09-27T10:00:00+00:00", "--fps", "5", "--threshold", "0.3",
+                          "--out", str(tmp_path / "ep"), "--live-dir", str(tmp_path / "live")], capture_output=True, text=True,
+                         env={**os.environ, "PYTHONPATH": os.getcwd()})
+    assert out.returncode == 0, out.stderr[-1500:]
+    row = json.loads(out.stdout[out.stdout.rindex("{\n"):])
+    assert row["cameras"] == 4 and row["episodes"] == 2 and row["realtime_factor"] > 1
+    engine = connect(db)
+    from vi.agent.tools import cameras_in_store, count_entities_window
+    assert cameras_in_store(engine) == ["cam01", "cam04"]              # the label boxes never became tubes
+    b = footage_bounds(engine)
+    assert count_entities_window(engine, b[0], b[1], camera_id="cam04")["count"] == 1
+    r = ask_window(engine, "Who was on cam 4?", FakeBackend(), b[1])
+    assert r["camera_id"] == "cam04"
+    assert ask_window(engine, "What happened on camera 9?", FakeBackend(), b[1])["grounding"] == "unknown_camera"
+    assert (tmp_path / "live" / "latest.jpg").exists()

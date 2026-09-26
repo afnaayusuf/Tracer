@@ -43,8 +43,14 @@ def score(res: dict, spec: dict, budget_ms: int, engine=None, episode_id: str | 
         truth = set(entities_present(engine, episode_id, 0.9)["entity_ids"])
         cited = {c for c in f.get("citations", []) if ":E" in c}
         whole_ok = (len(cited & truth) / len(truth) >= spec["whole_time_recall"]) if truth else True
+    gt_ok = True
+    if spec.get("whole_time_count") and f.get("citations"):
+        lo, hi = spec["whole_time_count"]
+        n = len({c for c in f["citations"] if ":E" in c})
+        gt_ok = lo <= n <= hi
     checks = {
         "whole_time": whole_ok,
+        "whole_time_gt": gt_ok,
         "answered": f["action"] == "answer",
         "mentions": all(_mentioned(m, text) for m in spec.get("must_mention", []) or []),
         "avoids": not any(_one(m, text) for m in spec.get("must_not_mention", []) or []),
