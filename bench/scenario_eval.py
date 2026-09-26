@@ -40,7 +40,7 @@ def score(res: dict, spec: dict, budget_ms: int) -> dict:
     checks = {
         "answered": f["action"] == "answer",
         "mentions": all(_mentioned(m, text) for m in spec.get("must_mention", []) or []),
-        "avoids": not any(m.lower() in text for m in spec.get("must_not_mention", []) or []),
+        "avoids": not any(_one(m, text) for m in spec.get("must_not_mention", []) or []),
         "cites": (f.get("cited", False) or spec.get("expect_uncited_ok", False))
                  and all(any(c.startswith(p) for c in f.get("citations", [])) for p in spec.get("must_cite_prefix", []) or []),
         "in_budget": res["latency"]["total_ms"] <= budget_ms,

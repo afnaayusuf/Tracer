@@ -207,3 +207,36 @@ def test_scenario_numbers_must_stand_alone():
     assert m._mentioned("14", "left at 00:14.0 and e14 and 140 people") is False
     assert m._mentioned("14", "there were 14 people") is True
     assert m._mentioned(["8", "eight"], "eight workers") is True
+    assert m._one("14", "cam1:e10 left at 00:14.0") is False       # the avoids rule uses the same test
+
+
+@pytest.mark.edge("E-AGT-06")
+def test_unsupported_event_claims_are_sent_back_and_reported(episode_path):
+    from vi.agent import ask
+    engine = connect()
+    load_episode_file(engine, episode_path)
+    ep = search_events(engine)[0]["episode_id"]
+
+    class Fabricator:
+        name = "fab"
+        def __init__(self): self.n = 0
+        def complete(self, messages, schema):
+            import json
+            self.n += 1
+            if self.n == 1:
+                return json.dumps({"action": "answer", "text": "Nobody fell. But cam1:2000:1 was seen falling at 00:09.",
+                                   "citations": [{"entity_id": "cam1:2000:1"}], "confidence": 0.9})
+            assert "fall" in messages[-1]["content"]
+            return json.dumps({"action": "answer", "text": "Nobody fell. cam1:2000:1 picked up the bike keys.",
+                               "citations": ["cam1:2000:1"], "confidence": 0.9})
+    out = ask(engine, "Did anyone fall?", ep, Fabricator())
+    assert any(t.get("revise") == "event claim without evidence" and t["claims"] == ["fall"] for t in out["trace"])
+    assert out["final"]["unsupported_event_claims"] == [] and out["final"]["cited"]      # pickup exists in this episode
+
+
+def test_salvage_flattens_citation_objects_and_ids_in_prose():
+    from vi.agent.loop import _salvage
+    import json
+    step = _salvage(json.dumps({"action": "answer", "text": "cam1:E10 arrived at 00:04.0 [ev_0123456789abcdef]",
+                                "citations": [{"entity_id": "cam1:E10"}, ["cam1:4000:10"], 7]}))
+    assert step is not None and step.citations == ["cam1:E10", "cam1:4000:10", "ev_0123456789abcdef"]

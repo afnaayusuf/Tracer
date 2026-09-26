@@ -52,17 +52,20 @@ install_vllm() {
   drv="$(driver_cuda)"
   # vLLM's PyPI wheel links libcudart of a fixed CUDA major (13 for 0.30); the torch build must match
   # the driver's CUDA, not the runtime's torch (session 18 forced cu128 and broke vllm._C).
-  backend="${VLLM_TORCH_BACKEND:-auto}"
+  drv_tag="$(echo "$drv" | tr -d .)"                       # 13.0 -> cu130: the exact build for this driver
+  backend="${VLLM_TORCH_BACKEND:-${drv_tag:+cu$drv_tag}}"; backend="${backend:-auto}"
   echo "-- installing vllm into the venv (driver CUDA ${drv:-?}, torch backend $backend; 3-6 min)"
   if command -v uv >/dev/null 2>&1 && uv pip install --python "$VENV/bin/python" -q --torch-backend="$backend" vllm >/tmp/vllm_install.log 2>&1; then echo "   ok (uv, torch-backend=$backend)"; return 0; fi
-  echo "   uv with --torch-backend failed: $(tail -1 /tmp/vllm_install.log | cut -c1-120)"
-  if command -v uv >/dev/null 2>&1 && uv pip install --python "$VENV/bin/python" -q vllm >/tmp/vllm_install.log 2>&1; then echo "   ok (uv)"; return 0; fi
+  echo "   uv with --torch-backend=$backend failed: $(tail -1 /tmp/vllm_install.log | cut -c1-120)"
+  if command -v uv >/dev/null 2>&1 && uv pip install --python "$VENV/bin/python" -q --torch-backend=auto vllm >/tmp/vllm_install.log 2>&1; then echo "   ok (uv, torch-backend=auto)"; return 0; fi
   if "$VENV/bin/python" -m pip install -q vllm >/tmp/vllm_install.log 2>&1; then echo "   ok (pip)"; return 0; fi
   echo "   failed: $(tail -2 /tmp/vllm_install.log | tr '\n' ' ')"; return 1
 }
 
-root_cause() {  # the informative lines of a failed vLLM start, not its last twelve
-  grep -iE "error|cuda|driver|out of memory|no kernel image|not supported|Traceback" "$LOG" | grep -v "TracerWarning" | head -12 | cut -c1-200
+root_cause() {  # everything from the first ERROR/Traceback to the end of the log, INFO lines dropped
+  local n; n="$(grep -nE "ERROR|Traceback|Error:" "$LOG" | head -1 | cut -d: -f1)"
+  if [ -n "$n" ]; then tail -n "+$n" "$LOG" | grep -v "INFO\|TracerWarning" | tail -40 | cut -c1-220
+  else tail -25 "$LOG" | cut -c1-220; fi
 }
 
 make_venv || { echo "could not create a virtualenv by any method"; exit 1; }
@@ -75,7 +78,7 @@ pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true
 # (Colab's LD_LIBRARY_PATH points at the main environment's CUDA libraries, which can shadow the venv's)
 nohup env -u PYTHONPATH PYTHONNOUSERSITE=1 LD_LIBRARY_PATH="${VLLM_LD_LIBRARY_PATH:-/usr/lib64-nvidia}" \
   "$VENV/bin/python" -m vllm.entrypoints.openai.api_server --model "$MODEL" --port "$PORT" \
-  --max-model-len 16384 --gpu-memory-utilization "${VLLM_GPU_UTIL:-0.6}" --dtype bfloat16 --max-num-seqs 4 \
+  --max-model-len "${VLLM_MAX_LEN:-8192}" --gpu-memory-utilization "${VLLM_GPU_UTIL:-0.85}" --dtype bfloat16 --max-num-seqs 4 \
   --enable-prefix-caching > "$LOG" 2>&1 &
 echo "-- waiting for http://127.0.0.1:$PORT (weights download on first run)"
 for i in $(seq 1 120); do

@@ -68,6 +68,7 @@ Rules: (1) the episode's scene script is given to you; call tools only when it d
 mm:ss.s in scripts and absolute milliseconds in tool args. Respond with exactly one JSON object per turn:
 {"action":"tool","tool":...,"args":{...},"why":...} | {"action":"answer","text":...,"citations":[...],"confidence":...}
 | {"action":"clarify","question":...}. Count people from CONFIRMED entities; BRIEF SIGHTINGS are not people.
+Keep answers under 80 words; mention only events that appear in the script or tool results.
 EVENT_TYPES: """ + ", ".join(EVENT_TYPES) + "\nTools: " + json.dumps(TOOL_SPECS)
 
 ID_RE = re.compile(r"\b(ev_[0-9a-f]{16}|[A-Za-z0-9_]+:E\d+|anon:[A-Za-z0-9_:]+|[A-Za-z0-9_]+:\d+:\d+)\b")
@@ -177,7 +178,7 @@ class TransformersBackend:
 
     name = "transformers"
 
-    def __init__(self, model_id: str = "Qwen/Qwen3.5-4B", max_new_tokens: int = 400, device: str | None = None):
+    def __init__(self, model_id: str = "Qwen/Qwen3.5-4B", max_new_tokens: int = 300, device: str | None = None, warmup: bool = True):
         import torch
         from transformers import AutoProcessor, AutoTokenizer
         self.torch = torch
@@ -201,6 +202,11 @@ class TransformersBackend:
             self.tok = AutoProcessor.from_pretrained(model_id)
         except Exception:
             self.tok = AutoTokenizer.from_pretrained(model_id)
+        if warmup:   # CUDA context, kernels and cache allocation happen here, not inside the first question
+            try:
+                self.complete([{"role": "system", "content": "Reply with {}"}, {"role": "user", "content": "{}"}], {})
+            except Exception:
+                pass
 
     def complete(self, messages: list[dict], schema: dict) -> str:
         msgs = list(messages)
@@ -219,6 +225,43 @@ class TransformersBackend:
         return extract_json(tokenizer.decode(gen, skip_special_tokens=True))
 
 
+def _flatten_ids(x: Any) -> list[str]:
+    """citations may arrive as strings, ints, dicts ({"entity_id": ...}) or nested lists"""
+    if x is None:
+        return []
+    if isinstance(x, (str, int)):
+        return ID_RE.findall(str(x)) or ([str(x)] if isinstance(x, str) else [])
+    if isinstance(x, dict):
+        return [i for v in x.values() for i in _flatten_ids(v)]
+    if isinstance(x, list):
+        return [i for v in x for i in _flatten_ids(v)]
+    return []
+
+
+EVENT_WORDS = {"pickup": ["pickup", "pick-up", "picked up", "picking up", "picks up"], "drop": ["drop event", "dropped"],
+               "fall": ["fall event", "fell", "falling"], "left_behind": ["left behind"], "loiter": ["loiter"],
+               "crowd": ["crowd event"], "run": ["running event"], "handoff": ["handoff", "hand-off"],
+               "impossible_transition": ["impossible transition"], "relink": ["relink"]}
+
+
+def contradicted_event_claims(engine: Engine, episode_id: str, text: str) -> list[str]:
+    """E-AGT-06 for prose: an answer that talks about an event type the episode does not contain
+    is asserting evidence that does not exist. Returns the offending event types."""
+    # sentence-level, ignoring negated mentions ("nobody fell", "no pickup events") which assert absence
+    neg = re.compile(r"\b(no|not|nobody|none|never|didn't|did not|wasn't|weren't|isn't|aren't|without)\b")
+    named: set[str] = set()
+    for sent in re.split(r"(?<=[.!?;])\s+", text.lower()):
+        if neg.search(sent):
+            continue
+        for et, words in EVENT_WORDS.items():
+            if any(w in sent for w in words):
+                named.add(et)
+    if not named:
+        return []
+    have = {e["type"] for e in T.search_events(engine, limit=10000) if e["episode_id"] == episode_id}
+    return sorted(et for et in named if et not in have)
+
+
 def _salvage(raw: str) -> AnswerStep | ClarifyStep | None:
     """Accept an answer that only failed on length or a missing optional field; never a tool
     call, which must be exact. Retrying seven times to trim a paragraph is not a behaviour."""
@@ -229,8 +272,12 @@ def _salvage(raw: str) -> AnswerStep | ClarifyStep | None:
     if not isinstance(obj, dict):
         return None
     if obj.get("action") == "answer" and isinstance(obj.get("text"), str):
-        cites = obj.get("citations") or []
-        return AnswerStep(text=obj["text"][:ANSWER_MAX_CHARS], citations=[str(c) for c in cites if isinstance(c, (str, int))][:50],
+        cites = _flatten_ids(obj.get("citations")) + ID_RE.findall(obj["text"])   # objects, nested lists, ids in prose
+        seen: list[str] = []
+        for c in cites:
+            if c not in seen:
+                seen.append(c)
+        return AnswerStep(text=obj["text"][:ANSWER_MAX_CHARS], citations=seen[:50],
                           confidence=float(obj.get("confidence", 0.5)) if isinstance(obj.get("confidence"), (int, float)) else 0.5)
     if obj.get("action") == "clarify" and isinstance(obj.get("question"), str):
         return ClarifyStep(question=obj["question"][:300])
@@ -317,13 +364,19 @@ def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int 
         valid = [c for c in step.citations if c in seen_ids]
         invalid = [c for c in step.citations if c not in seen_ids]
         already_revised = any("revise" in t for t in trace)
+        bad_claims = contradicted_event_claims(engine, episode_id, step.text)
+        if bad_claims and not already_revised:
+            trace.append({"step": i, "revise": "event claim without evidence", "claims": bad_claims})
+            messages.append({"role": "user", "content": f"TOOL RESULT: your answer mentions {bad_claims} but this episode contains no "
+                                                        f"events of that type. Remove or correct that claim; cite only events that exist."})
+            continue
         if invalid and not valid and not already_revised:
             trace.append({"step": i, "revise": "citations not in tool results", "invalid": invalid})
             messages.append({"role": "user", "content": "TOOL RESULT: your citations do not appear in any tool result. "
                                                         "Answer again citing only ids you were shown, or say nothing matched."})
             continue
         final = {"action": "answer", "text": step.text, "citations": valid, "rejected_citations": invalid,
-                 "confidence": step.confidence, "cited": bool(valid)}
+                 "confidence": step.confidence, "cited": bool(valid), "unsupported_event_claims": bad_claims}
         break
     if final is None:
         final = {"action": "answer", "text": "I could not complete this within the step budget.", "citations": [], "cited": False,
