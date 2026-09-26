@@ -64,7 +64,9 @@ def main() -> None:
                      + (f"ERROR {t['error'][:80]}" if t.get('error') else str(t['results'])) for t in res["trace"] if "tool" in t]
             lat = res["latency"]
             print(f"\nQ: {q}\n   latency: {lat['total_ms'] / 1000:.1f}s total (model {lat['model_ms'] / 1000:.1f}s, tools {lat['tool_ms']}ms, "
-                  f"{lat['turns']} turn(s), first prompt {lat['first_prompt_chars']} chars)\n   tools: " + (" | ".join(calls) or "none"))
+                  f"{lat['turns']} turn(s), first prompt {lat['first_prompt_chars']} chars"
+                  + (f", {lat['gen_tokens']} tokens @ {lat['tok_s']} tok/s, fused={lat['fused_kernels']}" if lat.get('tok_s') else "")
+                  + ")\n   tools: " + (" | ".join(calls) or "none"))
             bad = [t for t in res["trace"] if "invalid" in t or "salvaged" in t]
             if bad:
                 print("   " + " | ".join(f"invalid: {t['reason'][:90]}" if "invalid" in t else f"salvaged: {t['salvaged'][:90]}" for t in bad[:3]))

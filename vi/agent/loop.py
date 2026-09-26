@@ -68,7 +68,8 @@ Rules: (1) the episode's scene script is given to you; call tools only when it d
 mm:ss.s in scripts and absolute milliseconds in tool args. Respond with exactly one JSON object per turn:
 {"action":"tool","tool":...,"args":{...},"why":...} | {"action":"answer","text":...,"citations":[...],"confidence":...}
 | {"action":"clarify","question":...}. Count people from CONFIRMED entities; BRIEF SIGHTINGS are not people.
-Keep answers under 80 words; mention only events that appear in the script or tool results.
+Keep answers under 60 words; cite entity ids (cam1:E7), not tube ids, unless asked about tubes; mention only events
+that appear in the script or tool results.
 EVENT_TYPES: """ + ", ".join(EVENT_TYPES) + "\nTools: " + json.dumps(TOOL_SPECS)
 
 ID_RE = re.compile(r"\b(ev_[0-9a-f]{16}|[A-Za-z0-9_]+:E\d+|anon:[A-Za-z0-9_:]+|[A-Za-z0-9_]+:\d+:\d+)\b")
@@ -188,14 +189,24 @@ class TransformersBackend:
         dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
         last = None
         self.model = None
+        try:
+            import fla  # noqa: F401  (flash-linear-attention: fused kernels for Qwen3.5's GDN layers)
+            self.fused = True
+        except Exception:
+            self.fused = False
         for loader in ("AutoModelForImageTextToText", "AutoModelForCausalLM", "AutoModel"):
             try:
                 cls = getattr(__import__("transformers", fromlist=[loader]), loader)
-                self.model = cls.from_pretrained(model_id, dtype=dtype).to(self.device).eval()
+                try:
+                    self.model = cls.from_pretrained(model_id, dtype=dtype, attn_implementation="sdpa").to(self.device).eval()
+                except Exception:
+                    self.model = cls.from_pretrained(model_id, dtype=dtype).to(self.device).eval()
                 self.loader = loader
                 break
             except Exception as e:  # pragma: no cover
                 last = e
+        self.last_gen_tokens = 0
+        self.last_tok_s = 0.0
         if self.model is None:
             raise RuntimeError(f"could not load {model_id}: {last!r}")
         try:
@@ -218,9 +229,13 @@ class TransformersBackend:
             inputs = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True,
                                                   return_tensors="pt", return_dict=True)
         inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+        t0 = time.perf_counter()
         with self.torch.no_grad():
             out = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
         gen = out[0][inputs["input_ids"].shape[1]:]
+        dt = max(1e-6, time.perf_counter() - t0)
+        self.last_gen_tokens = int(getattr(gen, "shape", [len(gen)])[0])
+        self.last_tok_s = self.last_gen_tokens / dt
         tokenizer = getattr(self.tok, "tokenizer", self.tok)
         return extract_json(tokenizer.decode(gen, skip_special_tokens=True))
 
@@ -386,4 +401,6 @@ def ask(engine: Engine, question: str, episode_id: str, backend, max_steps: int 
             "steps": len(trace), "trace": trace, "final": final,
             "latency": {"total_ms": round(total_ms), "model_ms": round(model_ms), "tool_ms": round(tool_ms),
                         "turns": sum(1 for t in trace if "tool" in t or "revise" in t or "invalid" in t) + 1,
-                        "first_prompt_chars": len(first)}}
+                        "first_prompt_chars": len(first),
+                        "gen_tokens": getattr(backend, "last_gen_tokens", None), "tok_s": round(getattr(backend, "last_tok_s", 0.0), 1) or None,
+                        "fused_kernels": getattr(backend, "fused", None)}}

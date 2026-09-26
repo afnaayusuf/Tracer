@@ -44,12 +44,21 @@ driver_cuda() {  # e.g. 12.8 from nvidia-smi; the torch build must not be newer 
 }
 
 install_vllm() {
-  if [ -x "$VENV/bin/python" ]; then
-    if "$VENV/bin/python" -c "import vllm" >/tmp/vllm_import.log 2>&1; then return 0; fi
-    echo "-- venv exists but 'import vllm' fails ($(grep -oE "ImportError: [^\n]*|ModuleNotFoundError: [^\n]*" /tmp/vllm_import.log | head -1 | cut -c1-100)): rebuilding"
-    rm -rf "$VENV"; make_venv || return 1
-  fi
   drv="$(driver_cuda)"
+  if [ -x "$VENV/bin/python" ]; then
+    if "$VENV/bin/python" -c "import vllm" >/tmp/vllm_import.log 2>&1; then
+      have="$("$VENV/bin/python" -c "import torch; print(torch.version.cuda or '')" 2>/dev/null)"
+      if [ -n "$have" ] && [ -n "$drv" ] && [ "$have" != "$drv" ] && [ "${VLLM_KEEP_VENV:-0}" != "1" ]; then
+        echo "-- venv torch is cu$have but the driver is CUDA $drv: rebuilding with the exact driver build"
+        rm -rf "$VENV"; make_venv || return 1
+      else
+        return 0
+      fi
+    else
+      echo "-- venv exists but 'import vllm' fails ($(grep -oE "ImportError: [^\n]*|ModuleNotFoundError: [^\n]*" /tmp/vllm_import.log | head -1 | cut -c1-100)): rebuilding"
+      rm -rf "$VENV"; make_venv || return 1
+    fi
+  fi
   # vLLM's PyPI wheel links libcudart of a fixed CUDA major (13 for 0.30); the torch build must match
   # the driver's CUDA, not the runtime's torch (session 18 forced cu128 and broke vllm._C).
   drv_tag="$(echo "$drv" | tr -d .)"                       # 13.0 -> cu130: the exact build for this driver
@@ -62,10 +71,11 @@ install_vllm() {
   echo "   failed: $(tail -2 /tmp/vllm_install.log | tr '\n' ' ')"; return 1
 }
 
-root_cause() {  # everything from the first ERROR/Traceback to the end of the log, INFO lines dropped
-  local n; n="$(grep -nE "ERROR|Traceback|Error:" "$LOG" | head -1 | cut -d: -f1)"
-  if [ -n "$n" ]; then tail -n "+$n" "$LOG" | grep -v "INFO\|TracerWarning" | tail -40 | cut -c1-220
+root_cause() {  # the ENGINE's error (EngineCore lines) comes first in the log; the API server's stack only repeats it
+  local n; n="$(grep -nE "EngineCore.*(ERROR|Error|Traceback)|ERROR|Traceback|Error:" "$LOG" | head -1 | cut -d: -f1)"
+  if [ -n "$n" ]; then tail -n "+$n" "$LOG" | grep -v "INFO\|TracerWarning\|APIServer" | head -45 | cut -c1-220
   else tail -25 "$LOG" | cut -c1-220; fi
+  echo "   (full log: $LOG)"
 }
 
 make_venv || { echo "could not create a virtualenv by any method"; exit 1; }
