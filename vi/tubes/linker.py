@@ -30,15 +30,16 @@ class _Entity:
     aux: np.ndarray | None = None
     last_box_center: tuple[float, float] = (0.0, 0.0)
     last_box_h: float = 1.0
-    lost_at_ms: int | None = None      # set when its current tube closed (lost or exited); None while live
+    lost_at_ms: int | None = None      # set when its tube closed (lost/exited) OR went occluded; None while seen
     closed_as_exit: bool = False
+    live_tube_id: str | None = None    # an occluded-but-live tube: linking a newborn to this entity absorbs it
 
 
 class TubeLinker:
-    def __init__(self, camera_id: str, sim_thr: float = 0.75, max_gap_ms: int = 30_000,
+    def __init__(self, camera_id: str, sim_thr: float = 0.88, max_gap_ms: int = 30_000,
                  max_jump_px: float = 400.0, ema_alpha: float = 0.3, exemplars: int = 5,
-                 exited_sim_thr: float = 0.85, near_sim_thr: float = 0.65, near_gap_ms: int = 5000,
-                 near_jump_px: float = 200.0, aux_thr: float = 0.5):
+                 exited_sim_thr: float = 0.90, near_sim_thr: float = 0.85, near_gap_ms: int = 5000,
+                 near_jump_px: float = 200.0, aux_thr: float = 0.80):
         self.camera_id = camera_id
         self.sim_thr = sim_thr
         # a tube reappearing within a few seconds and a couple of body-widths of where one vanished
@@ -56,6 +57,7 @@ class TubeLinker:
         self._tube_entity: dict[str, str] = {}
         self._seq = 0
         self.relinks = 0
+        self.absorbed: list[str] = []      # ghost tubes the tracker should drop (read and clear each tick)
 
     # ---------------------------------------------------------------- helpers
     def _new_entity(self, tube: Tube, emb: np.ndarray, aux: np.ndarray | None = None) -> _Entity:
@@ -104,16 +106,18 @@ class TubeLinker:
             thr = self._thr(best, tube, t_ms)
             if sim >= thr:
                 prev = best.tube_ids[-1]
+                absorbed = best.live_tube_id                 # the occluded ghost this newborn replaces
                 best.tube_ids.append(tube.tube_id)
-                best.lost_at_ms = None
+                best.lost_at_ms, best.live_tube_id = None, None
                 self._tube_entity[tube.tube_id] = best.entity_id
                 self.on_refresh(tube, emb, aux)
                 self.relinks += 1
+                self.absorbed.append(absorbed) if absorbed else None
                 return Event(event_id="ev_" + hashlib.sha1(f"relink|{prev}|{tube.tube_id}".encode()).hexdigest()[:16],
                              type=EventType.relink, t=CamTime(cam_utc_ms=t_ms), camera_id=self.camera_id,
                              subject_tube_ids=[prev, tube.tube_id], subject_entity_ids=[best.entity_id],
                              payload={"similarity": round(sim, 3), "threshold": round(thr, 2),
-                                      "gap_ms": t_ms - (best.lost_at_ms or t_ms)},
+                                      "gap_ms": t_ms - (tube.born.corrected_ms()), "absorbed_tube": absorbed},
                              confidence=min(1.0, sim))
         self._new_entity(tube, emb, aux)
         return None
@@ -133,6 +137,22 @@ class TubeLinker:
             e.exemplars.pop(0)
         e.last_box_center, e.last_box_h = _center(tube), tube.box.height
 
+    def on_state(self, tube: Tube, t_ms: int) -> None:
+        """Called every tick for live tubes. The moment a tube goes occluded its entity becomes a
+        relink candidate: the same person re-detected nearby is a newborn tube the tracker could
+        not associate with the drifted prediction (the hard-hat man, session 23)."""
+        eid = self._tube_entity.get(tube.tube_id)
+        if eid is None:
+            return
+        e = self._entities[eid]
+        if tube.state == TubeState.occluded:
+            if e.lost_at_ms is None:
+                e.lost_at_ms = tube.occluded_since_ms if tube.occluded_since_ms is not None else t_ms
+            e.live_tube_id = tube.tube_id
+            e.last_box_center, e.last_box_h = _center(tube), tube.box.height
+        elif tube.state == TubeState.active and e.live_tube_id == tube.tube_id:
+            e.lost_at_ms, e.live_tube_id = None, None       # seen again: no longer a candidate
+
     def on_close(self, tube: Tube, t_ms: int) -> None:
         eid = self._tube_entity.get(tube.tube_id)
         if eid is None:
@@ -141,6 +161,7 @@ class TubeLinker:
         e.last_box_center, e.last_box_h = _center(tube), tube.box.height
         e.lost_at_ms = t_ms if tube.state in (TubeState.lost, TubeState.occluded, TubeState.exited) else None
         e.closed_as_exit = tube.state == TubeState.exited
+        e.live_tube_id = None
 
     def entity_of(self, tube_id: str) -> str | None:
         return self._tube_entity.get(tube_id)

@@ -117,6 +117,15 @@ class ByteTracker:
         return pairs, ut, ud, cost
 
     # ------------------------------------------------------------------ main
+    def drop(self, tube_id: str) -> Tube | None:
+        """Remove a live tube without closing it as lost/exited: its person continues in another
+        tube (the linker absorbed it). Returns the tube, state dead, for the episode record."""
+        tr = self._tracks.pop(tube_id, None)
+        if tr is None:
+            return None
+        tr.tube.state = TubeState.dead
+        return tr.tube
+
     def update(self, detections: list[Detection], t_ms: int,
                det_source: str = "detector") -> tuple[list[Tube], list[Tube]]:
         dt_s = 0.0 if self._last_t_ms is None else max(0.0, (t_ms - self._last_t_ms) / 1000.0)

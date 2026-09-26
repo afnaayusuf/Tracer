@@ -53,7 +53,8 @@ def main() -> None:
     ap.add_argument("--reid", choices=["none", "auto", "hist", "siglip", "osnet"], default="none",
                     help="appearance embeddings + TubeLinker (E-TUBE-04); auto = osnet > siglip > hist")
     ap.add_argument("--reid-every-ticks", type=int, default=8, help="gallery refresh cadence for active tubes")
-    ap.add_argument("--reid-sim", type=float, default=0.75)
+    ap.add_argument("--reid-sim", type=float, default=0.88, help="from bench/reid_eval.py (SigLIP on the warehouse clip)")
+    ap.add_argument("--reid-near-sim", type=float, default=0.85)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--max-frames", type=int, default=600)
     ap.add_argument("--zones", default=None, help="JSON zones file; default: data/zones/<clip stem>.json if present, else edge exits + centre floor")
@@ -96,7 +97,8 @@ def main() -> None:
     dup_frames: list[str] = []
     embedder = make_embedder(a.reid) if a.reid != "none" else None
     aux_embedder = HistogramEmbedder() if embedder and embedder.name != "hist" else None
-    linker = TubeLinker(a.camera, sim_thr=a.reid_sim) if embedder else None
+    linker = TubeLinker(a.camera, sim_thr=a.reid_sim, near_sim_thr=a.reid_near_sim) if embedder else None
+    absorbed_total = 0
     embed_ms: list[float] = []
     last_embed_tick: dict[str, int] = {}
     pending_link: dict[str, np.ndarray] = {}
@@ -197,6 +199,9 @@ def main() -> None:
                         linker.on_refresh(t, e, ax)
             live_ids = {t.tube_id for t in live}
             for t in live:
+                if t.class_label == "person" and t.tube_id not in pending_link:
+                    linker.on_state(t, fr.pts_ms)          # occluded tubes become relink candidates
+            for t in live:
                 if t.tube_id in pending_link and t.state.value == "active":
                     ev = linker.on_birth(t, pending_link.pop(t.tube_id), fr.pts_ms, pending_aux.pop(t.tube_id, None))
                     if ev is not None:
@@ -205,6 +210,13 @@ def main() -> None:
                         print(f"t={fr.pts_ms:7d}  relink                 {ev.subject_tube_ids[0]} -> {ev.subject_tube_ids[1]} sim={ev.payload['similarity']} thr={ev.payload['threshold']}")
             for tid in [k for k in pending_link if k not in live_ids]:
                 pending_link.pop(tid); pending_aux.pop(tid, None)    # deleted while unconfirmed: never linked
+            for ghost in linker.absorbed:                             # the occluded tube a link replaced
+                dead = tracker.drop(ghost)
+                if dead is not None:
+                    closed_all.append(dead)
+                    absorbed_total += 1
+            linker.absorbed.clear()
+            live = [t for t in live if t.tube_id in tracker._tracks]
             for t in live:
                 if t.class_label == "person":
                     t.entity_id = linker.entity_of(t.tube_id)
@@ -285,6 +297,7 @@ def main() -> None:
         "fragmentation_est": round(sum(1 for t in tubes if t.class_label == "person") / max(1.0, float(np.mean(person_dets))), 2) if person_dets else None,
         "reid": embedder.name if embedder else "none",
         "entities": linker.entities if linker else None, "relinks": linker.relinks if linker else None,
+        "ghosts_absorbed": absorbed_total if linker else None,
         "entities_per_concurrent": round(linker.entities / max(1, max(concurrent_persons) if concurrent_persons else 1), 2) if linker else None,
         "embed_ms_p50": round(float(np.median(embed_ms)), 2) if embed_ms else None,
         "births_by_origin": dict(births_by_origin), "confirmed_by_origin": dict(confirmed_by_origin),

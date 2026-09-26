@@ -103,7 +103,10 @@ class OSNetEmbedder:
 
     def __init__(self, model_name: str = "osnet_x0_25", model_path: str | None = None, device: str | None = None):
         import torch
-        from torchreid.utils import FeatureExtractor
+        try:
+            from torchreid.utils import FeatureExtractor
+        except ImportError:
+            from torchreid.reid.utils import FeatureExtractor      # PyPI package layout
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.extractor = FeatureExtractor(model_name=model_name, model_path=model_path, device=self.device)
 
