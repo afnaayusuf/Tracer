@@ -34,6 +34,12 @@ class AskIn(BaseModel):
     history: list[dict] | None = None      # previous exchanges [{"q","a","action"}], most recent last
 
 
+class DescribeIn(BaseModel):
+    camera_id: str
+    tube_ids: list[str]
+    crops_jpeg_b64: list[str]              # one JPEG per tube, base64
+
+
 class IngestIn(BaseModel):
     source: str
     start_time: str | None = None
@@ -65,7 +71,9 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
     engine = connect(db_url)
     app = FastAPI(title="vi-engine")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-    state = {"backend": None, "ingest": None, "started": time.time(), "model": model, "backend_name": backend_name}
+    import threading
+    state = {"backend": None, "ingest": None, "started": time.time(), "model": model, "backend_name": backend_name,
+             "writer": None, "model_lock": threading.Lock(), "questions_waiting": 0, "sheets": 0, "sheet_ms": [], "restarts": 0}
     tiles_path = Path(os.environ.get("VI_TILES") or (live_dir / "tiles.json"))
     os.environ["VI_TILES"] = str(tiles_path)                      # the feed side reads the same map
 
@@ -85,6 +93,40 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
     def clock(ms: int) -> str:
         return datetime.fromtimestamp(ms / 1000, tz).strftime("%H:%M:%S")
 
+    def writer():
+        """The writer shares the agent's loaded model: one copy of the weights on the GPU, one process."""
+        if state["writer"] is None:
+            be = backend()
+            if getattr(be, "name", "") == "transformers" and getattr(be, "model", None) is not None:
+                from vi.writer import WriterVLM
+                state["writer"] = WriterVLM(backend=be)
+            else:
+                state["writer"] = "fake"
+        return state["writer"]
+
+    @app.post("/describe")
+    def describe(inp: DescribeIn):
+        """Contact-sheet descriptions for the ingest. Questions have priority: a sheet waits while a
+        question is in flight, and the ingest never blocks on this call (it posts and moves on)."""
+        import base64, io
+        import numpy as np
+        from PIL import Image
+        crops = [np.asarray(Image.open(io.BytesIO(base64.b64decode(b))).convert("RGB")) for b in inp.crops_jpeg_b64]
+        w = writer()
+        if w == "fake":
+            cells = [{"tube_id": t, "attributes": {"modality": "rgb", "description": "person", "top_color": "orange", "confidence": 0.7}} for t in inp.tube_ids]
+            return {"cells": cells, "sheet_ms": 0}
+        for _ in range(200):                                     # yield to questions (max ~20 s of waiting)
+            if state["questions_waiting"] == 0:
+                break
+            time.sleep(0.1)
+        with state["model_lock"]:
+            res = w.describe(crops, inp.tube_ids)
+        state["sheets"] += 1; state["sheet_ms"].append(w.last_ms); state["sheet_ms"] = state["sheet_ms"][-50:]
+        if res is None:
+            return {"cells": [], "sheet_ms": w.last_ms}
+        return {"cells": [{"tube_id": c.tube_id, "attributes": c.attributes.model_dump(mode="json")} for c in res.cells], "sheet_ms": w.last_ms}
+
     def ingest_status() -> dict:
         p = state["ingest"]
         running = p is not None and p.poll() is None
@@ -93,7 +135,9 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
             st = json.loads((live_dir / "status.json").read_text())
         except Exception:
             pass
-        return {"running": running, "pid": p.pid if running else None, "exit_code": (p.returncode if p is not None and not running else None), **st}
+        return {"running": running, "pid": p.pid if running else None, "exit_code": (p.returncode if p is not None and not running else None),
+                "restarts": state["restarts"], "writer_sheets": state["sheets"],
+                "writer_ms_p50": (sorted(state["sheet_ms"])[len(state["sheet_ms"]) // 2] if state["sheet_ms"] else None), **st}
 
     def status_answer() -> dict:
         st = ingest_status()
@@ -142,13 +186,19 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         now_ms = b[1] if b else int(time.time() * 1000)
         import concurrent.futures
         deadline = float(os.environ.get("VI_ASK_DEADLINE_S", "80"))     # under Cloudflare's 100 s origin limit
-        pool = state.setdefault("pool", concurrent.futures.ThreadPoolExecutor(max_workers=1))
-        fut = pool.submit(ask_window, engine, q, backend(), now_ms, tz_name, 6, (inp.history or [])[-3:])
+        pool = state.setdefault("pool", concurrent.futures.ThreadPoolExecutor(max_workers=2))
+        def _run():
+            state["questions_waiting"] += 1
+            try:
+                with state["model_lock"]:                            # the writer yields; one model, questions first
+                    return ask_window(engine, q, backend(), now_ms, tz_name, 6, (inp.history or [])[-3:])
+            finally:
+                state["questions_waiting"] -= 1
+        fut = pool.submit(_run)
         try:
             r = fut.result(timeout=deadline)
         except concurrent.futures.TimeoutError:
-            return {"text": f"That took longer than {int(deadline)} s, probably because the engine is busy ingesting. "
-                            "Ask a narrower question (a camera or a time window), or try again in a moment.",
+            return {"text": f"That took longer than {int(deadline)} s. Ask a narrower question (a camera or a time window), or try again in a moment.",
                     "mood": "botUnsure", "citations": [], "evidence": [], "grounding": "timeout", "latency_ms": int(deadline * 1000)}
         f = r["final"]
         text = f.get("text") or f.get("question") or ""
@@ -210,8 +260,12 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
     def ingest_start(inp: IngestIn):
         if state["ingest"] is not None and state["ingest"].poll() is None:
             return {"started": False, "reason": "already running", **ingest_status()}
+        writer_mode = inp.writer
+        if writer_mode in ("qwen", "auto"):
+            writer_mode = "remote"                                   # the API's own model describes; the ingest never loads a VLM
         cmd = [sys.executable, "bench/run_ingest.py", "--source", inp.source, "--db", db_url, "--profile", inp.profile, "--reid", inp.reid,
-               "--writer", inp.writer, "--model", inp.model, "--fps", str(inp.fps), "--episode-min", str(inp.episode_min), "--live-dir", str(live_dir),
+               "--writer", writer_mode, "--writer-url", f"http://127.0.0.1:{os.environ.get('PORT', '8000')}/describe",
+               "--model", inp.model, "--fps", str(inp.fps), "--episode-min", str(inp.episode_min), "--live-dir", str(live_dir),
                "--tiles", inp.tiles]
         if inp.skip_s:
             cmd += ["--skip-s", str(inp.skip_s)]
@@ -227,10 +281,26 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         log = open(live_dir / "ingest.log", "a")
         state["ingest"] = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=os.getcwd())
         state["ingest_params"] = inp
+        threading.Thread(target=_watch_ingest, args=(state["ingest"], inp), daemon=True).start()
         if inp.tiles == "auto" and not tiles_path.exists() and inp.auto_tiles_after_min > 0:
             import threading
             threading.Thread(target=_auto_tiles, args=(inp, state["ingest"]), daemon=True).start()
         return {"started": True, "pid": state["ingest"].pid, "cmd": " ".join(cmd), "auto_tiles": inp.tiles == "auto" and not tiles_path.exists()}
+
+    def _watch_ingest(proc, inp: IngestIn) -> None:
+        """If the ingest dies with an error, restart it from the footage position it reached (up to 3 times)."""
+        rc = proc.wait()
+        if rc == 0 or state["ingest"] is not proc:
+            return
+        if state["restarts"] >= 3:
+            return
+        try:
+            st = json.loads((live_dir / "status.json").read_text()); pos = float(st.get("footage_s", 0))
+        except Exception:
+            pos = 0.0
+        state["restarts"] += 1
+        time.sleep(5)
+        ingest_start(inp.model_copy(update={"skip_s": pos, "auto_tiles_after_min": 0}))
 
     def _auto_tiles(inp: IngestIn, proc) -> None:
         """Phase 2 without anyone typing: after N minutes of footage, learn the map; if cameras group

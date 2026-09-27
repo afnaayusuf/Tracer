@@ -409,7 +409,9 @@ body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:var(
     var img = live.querySelector('img');
     img.src = API + '/live/latest.jpg?t=' + Date.now();
     fetch(API + '/health').then(function(r){ return r.json(); }).then(function(h){
-      live.querySelector('.status').textContent = h.footage ? (h.footage.start + ' → ' + h.footage.end + ' · ' + h.episodes + ' episodes' + (h.ingest && h.ingest.running ? ' · live' : '')) : 'no footage yet';
+      var ing = h.ingest || {};
+      var state = ing.running ? ' · live' : (ing.exit_code !== null && ing.exit_code !== undefined ? ' · ingest stopped (exit ' + ing.exit_code + (ing.restarts ? ', restarted ' + ing.restarts + 'x' : '') + ')' : ' · no ingest');
+      live.querySelector('.status').textContent = h.footage ? (h.footage.start + ' → ' + h.footage.end + ' · ' + h.episodes + ' episodes' + state) : ('no footage yet' + state);
     }).catch(function(){});
   }
   function setLive(on){

@@ -95,3 +95,56 @@ def test_open_episode_is_queryable_while_it_grows(tmp_path):
     from vi.store import load_episode_file
     load_episode_file(engine, w.path(ep))                                          # the full load at close is idempotent on top
     assert len(coverage_window(engine, T0, T0 + 5000)) == 1
+
+
+def test_describe_endpoint_and_shared_model_priority(store_with_footage):
+    import base64, io
+    import numpy as np
+    from PIL import Image
+    from fastapi.testclient import TestClient
+    from vi.api import create_app
+    db, tmp = store_with_footage
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", keyframes_dir=str(tmp / "keyframes"),
+                     live_dir=str(tmp / "live"), load_backend=False)
+    c = TestClient(app)
+    buf = io.BytesIO(); Image.fromarray(np.zeros((120, 40, 3), np.uint8)).save(buf, format="JPEG")
+    r = c.post("/describe", json={"camera_id": "cam1", "tube_ids": ["cam1:0:1"], "crops_jpeg_b64": [base64.b64encode(buf.getvalue()).decode()]}).json()
+    assert r["cells"][0]["tube_id"] == "cam1:0:1" and r["cells"][0]["attributes"]["description"]
+    st = c.get("/ingest/status").json()
+    assert "restarts" in st and "writer_sheets" in st
+
+
+def test_learned_media_zone_after_two_rejections(tmp_path):
+    """Two 'not a person' verdicts on the same spot make it a media zone for the rest of the run."""
+    import importlib.util, sys as _sys
+    spec = importlib.util.spec_from_file_location("run_ingest", "bench/run_ingest.py")
+    m = importlib.util.module_from_spec(spec); _sys.modules["run_ingest"] = m; spec.loader.exec_module(m)
+    from vi.schemas import Box, CamTime, Tube
+    cam = m.Cam(camera_id="cam03", tile_id="T1")
+    class _Tr:  # minimal tracker stand-in
+        _tracks = {}
+    cam.tracker = _Tr()
+    cam.ep_tubes = [Tube(tube_id=f"cam03:{i}:1", camera_id="cam03", class_label="person", born=CamTime(cam_utc_ms=i), last_seen=CamTime(cam_utc_ms=i + 5000),
+                         box=Box(x1=100, y1=200, x2=140, y2=300)) for i in (0, 9000)]
+    stats = {}
+    from collections import Counter
+    m_stats = Counter()
+    # emulate the closure's environment
+    def apply(cells):
+        # rebuild the function with a stats Counter bound (the real one is a closure inside main)
+        from vi.schemas import Attributes
+        from vi.events import Zone
+        for c in cells:
+            t = next(t for t in cam.ep_tubes if t.tube_id == c["tube_id"])
+            t.attributes = Attributes(**c["attributes"])
+            if t.attributes.description.startswith("NOT A PERSON"):
+                t.quality, t.quality_reason = "low", "writer: not a person"
+                b = t.box; cam.rejected_boxes.append((b.x1, b.y1, b.x2, b.y2))
+                hits = [r for r in cam.rejected_boxes if m._iou(r, (b.x1, b.y1, b.x2, b.y2)) > 0.5]
+                if len(hits) >= 2 and not cam.media:
+                    cam.media.append(Zone(zone_id="learned", camera_id="cam03", tile_id="T1", kind="media",
+                                          polygon=[(b.x1, b.y1), (b.x2, b.y1), (b.x2, b.y2), (b.x1, b.y2)]))
+    apply([{"tube_id": "cam03:0:1", "attributes": {"modality": "rgb", "description": "NOT A PERSON; a poster", "confidence": 0.9}}])
+    assert cam.media == []
+    apply([{"tube_id": "cam03:9000:1", "attributes": {"modality": "rgb", "description": "NOT A PERSON; a poster", "confidence": 0.9}}])
+    assert len(cam.media) == 1 and cam.media[0].kind == "media" and m._iou((0, 0, 10, 10), (5, 5, 15, 15)) > 0

@@ -42,6 +42,13 @@ def parse_start(s: str | None) -> int:
     return int(dt.timestamp() * 1000)
 
 
+def _iou(a, b) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0])); iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / ua if ua > 0 else 0.0
+
+
 @dataclass
 class Cam:
     camera_id: str
@@ -64,6 +71,8 @@ class Cam:
     pending_aux: dict = field(default_factory=dict)
     current: dict = field(default_factory=lambda: {"frame": None})
     last_annotated: np.ndarray | None = None
+    sheet_times: list = field(default_factory=list)
+    rejected_boxes: list = field(default_factory=list)
 
 
 def main() -> None:
@@ -76,9 +85,12 @@ def main() -> None:
     ap.add_argument("--start-time", default=None); ap.add_argument("--profile", default="common")
     ap.add_argument("--model", default="nano"); ap.add_argument("--fps", type=float, default=4.0)
     ap.add_argument("--threshold", type=float, default=0.1)
-    ap.add_argument("--reid", default="siglip"); ap.add_argument("--writer", choices=["none", "qwen", "fake", "auto"], default="auto",
-                    help="auto = qwen when the source has <= 8 cameras (descriptions cost one call per sighting), none above")
+    ap.add_argument("--reid", default="siglip"); ap.add_argument("--writer", choices=["none", "qwen", "fake", "auto", "remote"], default="auto",
+                    help="remote = POST sheets to the API's shared model (never blocks the ingest); qwen = load a VLM here; auto = remote if --writer-url answers, else qwen for <= 8 cameras")
     ap.add_argument("--writer-model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--writer-url", default="http://127.0.0.1:8000/describe")
+    ap.add_argument("--writer-min-life-s", type=float, default=2.0, help="describe a person only after this long (flickers are not worth a sheet)")
+    ap.add_argument("--writer-max-per-min", type=int, default=6, help="sheets per camera per minute")
     ap.add_argument("--zones", default=None, help="zones JSON (single camera); grid cameras get border exits + label media zones")
     ap.add_argument("--episode-min", type=float, default=10.0); ap.add_argument("--quiet-close-s", type=float, default=30.0)
     ap.add_argument("--realtime", action="store_true"); ap.add_argument("--max-minutes", type=float, default=0)
@@ -119,9 +131,58 @@ def main() -> None:
     embedder = make_embedder(a.reid) if a.reid != "none" else None
     aux = HistogramEmbedder() if embedder and embedder.name != "hist" else None
     vlm = None
-    if a.writer == "auto":
+    remote = None
+    if a.writer in ("auto", "remote"):
+        try:
+            import urllib.request
+            urllib.request.urlopen(a.writer_url.rsplit("/", 1)[0] + "/health", timeout=3)
+            remote = a.writer_url
+            print(f"[writer] remote -> {remote} (the API's model describes; this process never blocks on it)", flush=True)
+        except Exception:
+            remote = None
+            if a.writer == "remote":
+                print("[writer] remote unavailable; no descriptions", flush=True); a.writer = "none"
+    if a.writer == "auto" and remote is None:
         a.writer = "qwen" if n_cams <= 8 else "none"
         print(f"[writer] auto -> {a.writer} ({n_cams} camera(s))", flush=True)
+    if remote is not None:
+        import base64, io, queue, threading
+        from PIL import Image
+        _q: "queue.Queue" = queue.Queue(maxsize=32)
+        _results: "queue.Queue" = queue.Queue()
+        def _worker():
+            import urllib.request
+            while True:
+                item = _q.get()
+                if item is None:
+                    return
+                cam_id, tids, crops = item
+                try:
+                    payload = {"camera_id": cam_id, "tube_ids": tids, "crops_jpeg_b64": []}
+                    for c in crops:
+                        buf = io.BytesIO(); Image.fromarray(np.ascontiguousarray(c)).save(buf, format="JPEG", quality=85)
+                        payload["crops_jpeg_b64"].append(base64.b64encode(buf.getvalue()).decode())
+                    req = urllib.request.Request(remote, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+                    r = json.load(urllib.request.urlopen(req, timeout=120))
+                    _results.put((cam_id, r.get("cells", [])))
+                except Exception as e:
+                    _results.put((cam_id, {"error": str(e)[:120]}))
+        threading.Thread(target=_worker, daemon=True).start()
+        class _Remote:
+            calls = 0; last_ms = 0.0
+            def submit(self, cam_id, crops, tids):
+                try:
+                    _q.put_nowait((cam_id, list(tids), list(crops))); self.calls += 1; return True
+                except queue.Full:
+                    return False
+            def poll(self):
+                out = []
+                while True:
+                    try:
+                        out.append(_results.get_nowait())
+                    except queue.Empty:
+                        return out
+        vlm = _Remote()
     if a.writer == "qwen":
         try:
             from vi.writer import WriterVLM
@@ -195,6 +256,37 @@ def main() -> None:
         print(f"[episode] {cam.camera_id} {cam.ep} {status.value} {len(cam.ep_tubes)} tubes -> store tubes={counts['tubes']} events={counts['events']}", flush=True)
         cam.ep, cam.ep_tubes, cam.ep_cast_prev = None, [], set()
 
+    def apply_descriptions(cam: Cam, cells: list[dict]) -> None:
+        """Attach writer output to the tubes it describes (live or already closed in this episode). A
+        'not a person' verdict grades the tube low; two rejections at the same spot make a media zone."""
+        from vi.schemas import Attributes
+        from vi.events import Zone
+        index = {tr.tube.tube_id: tr.tube for tr in cam.tracker._tracks.values()} if cam.tracker else {}
+        index.update({t.tube_id: t for t in cam.ep_tubes})
+        for c in cells:
+            t = index.get(c.get("tube_id"))
+            if t is None:
+                continue
+            try:
+                attrs = Attributes(**c["attributes"])
+            except Exception:
+                continue
+            if attrs.confidence <= 0:
+                continue
+            t.attributes = attrs
+            if (attrs.description or "").startswith("NOT A PERSON"):
+                t.quality, t.quality_reason = "low", "writer: not a person"
+                stats["writer_rejections"] += 1
+                b = t.box
+                cam.rejected_boxes.append((b.x1, b.y1, b.x2, b.y2))
+                hits = [r for r in cam.rejected_boxes if _iou(r, (b.x1, b.y1, b.x2, b.y2)) > 0.5]
+                if len(hits) >= 2 and not any(z.zone_id == f"learned_media_{int(b.x1)}_{int(b.y1)}" for z in cam.media):
+                    pad = 0.1 * max(b.width, b.height)
+                    z = Zone(zone_id=f"learned_media_{int(b.x1)}_{int(b.y1)}", camera_id=cam.camera_id, tile_id=cam.tile_id, kind="media",
+                             polygon=[(b.x1 - pad, b.y1 - pad), (b.x2 + pad, b.y1 - pad), (b.x2 + pad, b.y2 + pad), (b.x1 - pad, b.y2 + pad)])
+                    cam.media.append(z); cam.zones.append(z); stats["learned_media_zones"] += 1
+                    print(f"[media] {cam.camera_id}: learned media zone at ({int(b.x1)},{int(b.y1)})-({int(b.x2)},{int(b.y2)}) after {len(hits)} 'not a person' verdicts", flush=True)
+
     def step_cam(cam: Cam, rgb: np.ndarray, gray: np.ndarray, pts_ms: int, t_ms: int, dets: list) -> None:
         cam.current["frame"] = rgb
         g = cam.gate.update(gray, pts_ms)
@@ -236,19 +328,26 @@ def main() -> None:
             for t in live:
                 if t.class_label == "person": t.entity_id = cam.linker.entity_of(t.tube_id)
         if vlm is not None and frames % 4 == 0:
-            todo = [t for t in live if t.class_label == "person" and t.state.value == "active" and t.tube_id not in cam.described][:8]
-            if todo:
-                res = vlm.describe([crop_for_embedding(rgb, t.box, pad=0.15) for t in todo], [t.tube_id for t in todo])
-                if res is not None:
-                    by = {c.tube_id: c.attributes for c in res.cells}
-                    for t in todo:
-                        if t.tube_id in by and by[t.tube_id].confidence > 0:
-                            t.attributes = by[t.tube_id]
-                            if (by[t.tube_id].description or "").startswith("NOT A PERSON"):
-                                t.quality, t.quality_reason = "low", "writer: not a person"
-                                stats["writer_rejections"] += 1
-                for t in todo: cam.described.add(t.tube_id)
-                stats["sheets"] += 1
+            recent = [x for x in cam.sheet_times if t_ms - x < 60_000]; cam.sheet_times = recent
+            todo = [t for t in live if t.class_label == "person" and t.state.value == "active" and t.tube_id not in cam.described
+                    and t.last_seen.corrected_ms() - t.born.corrected_ms() >= a.writer_min_life_s * 1000][:8]
+            if todo and len(recent) < a.writer_max_per_min:
+                crops = [crop_for_embedding(rgb, t.box, pad=0.15) for t in todo]
+                if hasattr(vlm, "submit"):                                   # remote: post and move on
+                    if vlm.submit(cam.camera_id, crops, [t.tube_id for t in todo]):
+                        for t in todo: cam.described.add(t.tube_id)
+                        cam.sheet_times.append(t_ms); stats["sheets"] += 1
+                else:
+                    res = vlm.describe(crops, [t.tube_id for t in todo])
+                    cells = [{"tube_id": c.tube_id, "attributes": c.attributes.model_dump(mode="json")} for c in res.cells] if res is not None else []
+                    apply_descriptions(cam, cells)
+                    for t in todo: cam.described.add(t.tube_id)
+                    cam.sheet_times.append(t_ms); stats["sheets"] += 1
+        if vlm is not None and hasattr(vlm, "poll"):
+            for cam_id, cells in vlm.poll():
+                if isinstance(cells, dict):
+                    stats["writer_errors"] += 1; continue
+                apply_descriptions(cams[cam_id], cells)
         cam.ep_tubes += closed
         if cam.ep is not None:
             snaps = [TubeSnapshot(tube_id=t.tube_id, class_label=t.class_label, state=t.state, box=t.box,

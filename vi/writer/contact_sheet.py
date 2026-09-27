@@ -19,7 +19,8 @@ WRITER_PROMPT = (
     "This image is a grid of cells; each cell shows one person cropped from a camera, with the cell number in the "
     "yellow strip under it (the strip is a label, not part of the scene). For EVERY cell, describe that person only. "
     "Reply with a JSON array, one object per cell, no prose:\n"
-    '[{"cell_id": 0, "is_person": true or false (false if the cell shows no person: a box, a chair, a wall, a reflection), '
+    '[{"cell_id": 0, "is_person": true or false (false if the cell shows no REAL person: a box, a chair, a wall, a reflection, '
+    'a mannequin, or a person PRINTED on a poster, packaging or a screen), '
     '"top_color": colour of the most visible upper-body garment (a vest counts), one of ' + str(COLORS) + ' or null, '
     '"bottom_color": same or null, '
     '"headwear": short text or null, "carried_item": short text or null, "role": short text or null, '
