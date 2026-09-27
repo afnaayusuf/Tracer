@@ -141,8 +141,9 @@ def main() -> None:
     tilemap = None
     if a.tiles == "one":
         tilemap = TileMap.homo(ids)
+        tilemap.save(Path(a.live_dir) / "tiles.json")
     elif a.tiles and a.tiles != "none":
-        tilemap = TileMap.load("data/tiles.json" if a.tiles == "auto" else a.tiles)
+        tilemap = TileMap.load((Path(a.live_dir) / "tiles.json") if a.tiles == "auto" else a.tiles)
     def tile_for(cid: str) -> str:
         if tilemap is not None:
             return tilemap.tile_of(cid)

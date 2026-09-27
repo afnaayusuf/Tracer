@@ -126,8 +126,8 @@ class TubeLinker:
 
     def on_birth(self, tube: Tube, emb: np.ndarray, t_ms: int, aux: np.ndarray | None = None) -> Event | None:
         cands = self._candidates(tube, t_ms)
-        if aux is not None:   # second-signal gate first: candidates whose colour disagrees are out
-            cands = [e for e in cands if e.aux is None or float(e.aux @ aux) >= self.aux_thr]
+        if aux is not None:   # colour gate on same-camera candidates only: another camera has another background and light
+            cands = [e for e in cands if tube.camera_id not in e.cameras or e.aux is None or float(e.aux @ aux) >= self.aux_thr]
         if cands:
             best = max(cands, key=lambda e: self._sim(e, emb))
             sim = self._sim(best, emb)

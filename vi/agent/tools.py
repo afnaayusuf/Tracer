@@ -281,7 +281,11 @@ def coverage_window(engine: Engine, t_start_ms: int, t_end_ms: int, class_label:
         if cur: covered += cur[1] - cur[0]
         attrs = next((r["attributes"] for r in rs if r.get("attributes")), None)
         emb = next((r["embedding"] for r in rs if r.get("embedding")), None)
-        out.append({"entity_id": eid, "embedding": emb, "first_seen_ms": max(t_start_ms, min(r["born_ms"] for r in rs)),
+        cam_iv: dict[str, list[tuple[int, int]]] = {}
+        for r in rs:
+            cam_iv.setdefault(r["camera_id"], []).append((max(t_start_ms, r["born_ms"]), min(t_end_ms, r["last_seen_ms"])))
+        out.append({"entity_id": eid, "embedding": emb, "cam_intervals": cam_iv, "top_color": (attrs or {}).get("top_color") if attrs else None,
+                    "first_seen_ms": max(t_start_ms, min(r["born_ms"] for r in rs)),
                     "last_seen_ms": min(t_end_ms, max(r["last_seen_ms"] for r in rs)), "coverage": round(covered / span, 3),
                     "tubes": len(rs), "quality": "ok" if ok else "low", "cameras": sorted({r["camera_id"] for r in rs}),
                     "looks": (attrs or {}).get("description") if attrs else None,
@@ -289,10 +293,27 @@ def coverage_window(engine: Engine, t_start_ms: int, t_end_ms: int, class_label:
     return sorted(out, key=lambda x: (-x["coverage"], x["first_seen_ms"]))
 
 
-def world_groups(rows: list[dict], sim_thr: float = 0.85, max_gap_ms: int = 60_000) -> dict[str, str]:
-    """Cross-camera fusion at query time (R14): entities on DIFFERENT cameras whose appearance
-    embeddings agree and whose times overlap (or nearly) are one world person. Never joins two
-    entities of the same camera: that camera's linker already decided they are different people.
+def co_visible(a: dict, b: dict, min_overlap_ms: int = 500) -> bool:
+    """Hard evidence for two different people: one camera saw both at the same time."""
+    for cam, ivs in (a.get("cam_intervals") or {}).items():
+        for (x1, x2) in ivs:
+            for (y1, y2) in (b.get("cam_intervals") or {}).get(cam, []):
+                if min(x2, y2) - max(x1, y1) >= min_overlap_ms:
+                    return True
+    return False
+
+
+def looks_compatible(a: dict, b: dict) -> bool:
+    ca, cb = a.get("top_color"), b.get("top_color")
+    return ca is None or cb is None or ca == cb
+
+
+def world_groups(rows: list[dict], sim_thr: float = 0.85, max_gap_ms: int = 60_000, tile_map=None) -> dict[str, str]:
+    """Cross-camera fusion at query time (R14). Two rules, in this order:
+      1. HARD EVIDENCE: two entities seen at the same time by the same camera are different people. Never merged.
+      2. In a shared tile (homo BuF, or a learned tile), entities that were never co-visible on any camera and
+         whose descriptions are compatible are ONE person: several angles of the same body look different to a
+         general embedding, and that is not evidence of two people. Across tiles, appearance + time still decide.
     Returns entity_id -> world id (W1, W2, ...), ordered by first appearance."""
     import numpy as np
     ids = [r["entity_id"] for r in rows]
@@ -301,20 +322,45 @@ def world_groups(rows: list[dict], sim_thr: float = 0.85, max_gap_ms: int = 60_0
         while parent[x] != x:
             parent[x] = parent[parent[x]]; x = parent[x]
         return x
+    def same_tile(a: dict, b: dict) -> bool:
+        if a["entity_id"].startswith("site:") or b["entity_id"].startswith("site:"):
+            return True                                              # ingested as one site (tiles=one)
+        if tile_map is None:
+            return False
+        ta = {tile_map.tile_of(c) for c in a.get("cameras", [])}
+        tb = {tile_map.tile_of(c) for c in b.get("cameras", [])}
+        return bool(ta & tb)
     embs = {r["entity_id"]: (np.asarray(r["embedding"], np.float32) if r.get("embedding") else None) for r in rows}
+    by_id = {r["entity_id"]: r for r in rows}
+    members: dict[str, set[str]] = {i: {i} for i in ids}          # root -> members, to keep merges conflict-free
+    proposals: list[tuple[float, str, str]] = []                 # (strength, a, b): strongest merges first
     for i, a in enumerate(rows):
         for b in rows[i + 1:]:
-            if set(a.get("cameras", [])) & set(b.get("cameras", [])):
-                continue                                             # same camera: already distinct
-            ea, eb = embs[a["entity_id"]], embs[b["entity_id"]]
-            if ea is None or eb is None or ea.shape != eb.shape:
-                continue
+            if co_visible(a, b):
+                continue                                             # rule 1: never a proposal
             gap = max(a["first_seen_ms"], b["first_seen_ms"]) - min(a["last_seen_ms"], b["last_seen_ms"])
             if gap > max_gap_ms:
                 continue
+            if same_tile(a, b) and looks_compatible(a, b):
+                proposals.append((2.0 - min(1.0, max(0, gap) / max_gap_ms), a["entity_id"], b["entity_id"]))   # rule 2
+                continue
+            if set(a.get("cameras", [])) & set(b.get("cameras", [])) or not looks_compatible(a, b):
+                continue
+            ea, eb = embs[a["entity_id"]], embs[b["entity_id"]]
+            if ea is None or eb is None or ea.shape != eb.shape:
+                continue
             sim = float(ea @ eb) / (float(np.linalg.norm(ea)) * float(np.linalg.norm(eb)) + 1e-8)
             if sim >= sim_thr:
-                parent[find(a["entity_id"])] = find(b["entity_id"])
+                proposals.append((sim, a["entity_id"], b["entity_id"]))
+    for _, x, y in sorted(proposals, reverse=True):
+        rx, ry = find(x), find(y)
+        if rx == ry:
+            continue
+        # a merge must not put two co-visible entities in one group, even transitively (rule 1 wins)
+        if any(co_visible(by_id[p], by_id[q]) for p in members[rx] for q in members[ry]):
+            continue
+        parent[ry] = rx
+        members[rx] |= members.pop(ry)
     order: dict[str, str] = {}
     for r in sorted(rows, key=lambda x: x["first_seen_ms"]):
         root = find(r["entity_id"])
@@ -323,15 +369,36 @@ def world_groups(rows: list[dict], sim_thr: float = 0.85, max_gap_ms: int = 60_0
     return {r["entity_id"]: order[find(r["entity_id"])] for r in rows}
 
 
+def hard_evidence_people(rows: list[dict]) -> int:
+    """The most entities any single camera saw at once: the number of people the footage PROVES."""
+    best = 0
+    by_cam: dict[str, list[tuple[int, int]]] = {}
+    for r in rows:
+        for cam, ivs in (r.get("cam_intervals") or {}).items():
+            by_cam.setdefault(cam, []).extend(ivs)
+    for cam, ivs in by_cam.items():
+        edges = sorted([(a, 1) for a, _ in ivs] + [(b, -1) for _, b in ivs], key=lambda e: (e[0], e[1]))
+        cur = 0
+        for _, d in edges:
+            cur += d; best = max(best, cur)
+    return best
+
+
+def load_tile_map():
+    import os
+    from vi.fusion import TileMap
+    return TileMap.load(os.environ.get("VI_TILES", "data/tiles.json"))
+
+
 def count_entities_window(engine: Engine, t_start_ms: int, t_end_ms: int, class_label: str = "person", camera_id: str | None = None) -> dict:
     rows = coverage_window(engine, t_start_ms, t_end_ms, class_label, camera_id=camera_id)
-    worlds = world_groups(rows)
+    worlds = world_groups(rows, tile_map=load_tile_map())
     groups: dict[str, list[str]] = {}
     for eid, w in worlds.items():
         groups.setdefault(w, []).append(eid)
-    return {"count": len(groups), "people": len(groups), "camera_entities": len(rows),
+    return {"count": len(groups), "people": len(groups), "hard_evidence_min_people": hard_evidence_people(rows), "camera_entities": len(rows),
             "world_groups": groups, "entity_ids": [r["entity_id"] for r in rows], "window_ms": [t_start_ms, t_end_ms], "camera_id": camera_id,
-            "note": "count = people after joining the same person across cameras; camera_entities = per-camera tracks"}
+            "note": "count = people after joining views of the same person; hard_evidence_min_people = the most seen at once by one camera"}
 
 
 def entities_present_window(engine: Engine, t_start_ms: int, t_end_ms: int, min_coverage: float = 0.9, class_label: str = "person",
@@ -355,11 +422,13 @@ def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str =
         eps = [e for e in eps if camera_id in (e["camera_ids"] or [])]
     all_cams = cameras_in_store(engine)
     cast = coverage_window(engine, t_start_ms, t_end_ms, camera_id=camera_id)
-    worlds = world_groups(cast)
+    worlds = world_groups(cast, tile_map=load_tile_map())
     n_people = len(set(worlds.values()))
+    hard = hard_evidence_people(cast)
     lines = [f"WINDOW {clock(t_start_ms)}–{clock(t_end_ms)} ({(t_end_ms - t_start_ms) / 60000:.1f} min) | episodes {len(eps)} | "
              + (f"camera {camera_id}" if camera_id else f"cameras {','.join(all_cams)}"),
-             f"CAST: {n_people} people" + (f" ({len(cast)} camera tracks; W-ids join the same person seen on several cameras)" if len(all_cams) > 1 else "")]
+             f"CAST: {n_people} people" + (f" ({len(cast)} camera tracks joined by W-id; hard evidence: at most {hard} seen at once by any one camera)"
+                                            if len(all_cams) > 1 else "")]
     by_world: dict[str, list[dict]] = {}
     for c in cast:
         by_world.setdefault(worlds[c["entity_id"]], []).append(c)

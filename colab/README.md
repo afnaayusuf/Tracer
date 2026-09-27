@@ -121,5 +121,5 @@ moment they are seen twice. Until a map exists, identities are per camera and an
   the appearance bar, which is what a top-down view needs).
 * **hetero**: cells are chained locations with hand-offs. `"tiles": "auto"` (default): identities are per camera
   until the engine has seen ~5 minutes, then it learns tiles (simultaneous matches) and adjacency (sequential
-  matches with travel times), saves the map and restarts itself from where it was. Hand-offs link a person who
+  matches with travel times), saves the map (data/live/tiles.json) and restarts itself from where it was. Hand-offs link a person who
   left tile A and appears on adjacent tile B within the learned travel time; non-adjacent tiles never link.

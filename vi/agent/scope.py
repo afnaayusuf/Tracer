@@ -13,9 +13,17 @@ FOOTAGE_WORDS = re.compile(r"\b(camera|footage|video|clip|zone|conveyor|table|do
                            r"who|where|when|how many|what (happened|was|were)|did|entered|left|arrive|carry|wearing)\b", re.I)
 
 
+STATUS = re.compile(r"\b(is (it|this|the (engine|system|lib|library|backend)) (working|running|updating|processing|live|alive|on)|"
+                    r"are you (working|processing|running|live|updating)|what('s| is) (the )?status|status\??$|still (working|processing|running)|"
+                    r"is (the )?(lib|library|db|database)( is)? (updating|updated|growing)|how far (are you|is it)|progress|"
+                    r"(lib|library|database|db)\b.*\b(updating|updated|processing|growing))\b", re.I)
+
+
 def classify(question: str) -> tuple[str, str]:
-    """returns (kind, message). kind: ok | off_topic | predict | act | identity"""
+    """returns (kind, message). kind: ok | off_topic | predict | act | identity | status"""
     q = question.strip()
+    if STATUS.search(q):
+        return "status", ""
     if ACT.search(q):
         return "act", "I only report what the cameras recorded; I can't take actions on devices or send messages."
     if PREDICT.search(q) and not re.search(r"\b(was|were|did|happened)\b", q, re.I):

@@ -468,7 +468,9 @@ SYSTEM_LIVE_SUFFIX = """
 You are answering about recorded footage. FOOTAGE: {start}–{end} ({tz}); the latest processed moment is {now}.
 The scene script below covers only the window {ws}–{we}. If the question needs a different time, say which
 window you are answering about. W-ids (W1, W2…) are people; a person seen on several cameras has one W-id and several
-camera tracks (cam03:E1 …). Count people by W-ids, never by camera tracks. If nothing in the window matches, say so plainly. Never guess names: people are
+camera tracks (cam03:E1 …). Count people by W-ids, never by camera tracks. When the cast says "hard evidence: at most N seen
+at once", the footage proves no more than N people were ever visible together; several W-ids with the same looks are
+probably one person seen from different angles, and you should say so. If nothing in the window matches, say so plainly. Never guess names: people are
 unnamed unless the cast says otherwise; describe them from their `looks` instead. Counts carry an uncertainty of
 about ±1 person; say "about" for counts above 3. Do not speculate about what happened outside the footage.
 """

@@ -6,3 +6,6 @@ data/synthetic/
 data/keyframes/
 data/debug/
 data/*.db
+data/live/
+data/tiles.json
+data/metamorphic/

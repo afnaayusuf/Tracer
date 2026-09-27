@@ -318,3 +318,27 @@ def test_homo_buf_gives_one_identity_from_the_start_and_adjacency_is_learned(tmp
     tm = discover_tiles(ents, cameras=["cam01", "cam05"])
     assert tm.tiles == {"T1": ["cam01"], "T2": ["cam05"]} and tm.kind == "hetero"
     assert "T1|T2" in tm.adjacency and tm.adjacency["T1|T2"]["handoffs"] == 2 and tm.relation("cam01", "cam05")[0] == "adjacent"
+
+
+def test_feed_side_merges_views_of_one_person_but_never_co_visible_ones():
+    from vi.agent.tools import hard_evidence_people, world_groups
+    def row(eid, cams, a, b, color, emb):
+        return {"entity_id": eid, "cameras": cams, "first_seen_ms": a, "last_seen_ms": b, "top_color": color, "embedding": emb,
+                "cam_intervals": {c: [(a, b)] for c in cams}}
+    e1 = [1.0, 0.0]; e2 = [0.0, 1.0]                                  # dissimilar embeddings on purpose
+    rows = [row("site:E1", ["cam01"], 0, 60000, "blue", e1), row("site:E2", ["cam02"], 5000, 40000, "blue", e2),
+            row("site:E3", ["cam04"], 10000, 50000, None, e2)]
+    w = world_groups(rows)
+    assert len(set(w.values())) == 1                                   # one man, three angles, no co-visibility -> one person
+    rows2 = rows + [row("site:E4", ["cam01"], 20000, 30000, "blue", e2)]  # seen on cam01 WHILE E1 is on cam01: a second person
+    w2 = world_groups(rows2)
+    assert w2["site:E4"] != w2["site:E1"] and len(set(w2.values())) == 2
+    assert hard_evidence_people(rows) == 1 and hard_evidence_people(rows2) == 2
+    rows3 = [row("cam01:E1", ["cam01"], 0, 60000, "blue", e1), row("cam02:E1", ["cam02"], 5000, 40000, "red", e1)]
+    assert len(set(world_groups(rows3).values())) == 2                # no shared tile known, incompatible looks: two
+
+
+def test_status_questions_are_answered_from_the_ingest(tmp_path):
+    from vi.agent import classify_scope
+    assert classify_scope("is it working..?")[0] == "status" and classify_scope("right now, is the lib is updating..")[0] == "status"
+    assert classify_scope("who was at the counter?")[0] == "ok"

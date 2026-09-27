@@ -66,7 +66,8 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
     app = FastAPI(title="vi-engine")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     state = {"backend": None, "ingest": None, "started": time.time(), "model": model, "backend_name": backend_name}
-    tiles_path = Path(os.environ.get("VI_TILES", "data/tiles.json"))
+    tiles_path = Path(os.environ.get("VI_TILES") or (live_dir / "tiles.json"))
+    os.environ["VI_TILES"] = str(tiles_path)                      # the feed side reads the same map
 
     def backend():
         if state["backend"] is None:
@@ -94,6 +95,30 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
             pass
         return {"running": running, "pid": p.pid if running else None, "exit_code": (p.returncode if p is not None and not running else None), **st}
 
+    def status_answer() -> dict:
+        st = ingest_status()
+        b = footage_bounds(engine)
+        bits = []
+        if st.get("running"):
+            bits.append(f"Yes. The engine is processing (pid {st['pid']}): {st.get('cameras') or '?'} camera(s), "
+                        f"{st.get('frames') or 0} frames so far, footage position {clock(st['now_ms']) if st.get('now_ms') else '?'}"
+                        + (f", keeping up at {st['footage_s'] / max(st['wall_s'], 1):.2f}x real time" if st.get('footage_s') and st.get('wall_s') else "")
+                        + f", {st.get('episodes', 0)} episode(s) in the lib" + (f", {st.get('sheets', 0)} description sheets" if st.get('sheets') else "") + ".")
+        else:
+            bits.append("No ingest is running right now" + (f" (the last one exited with code {st['exit_code']})" if st.get("exit_code") is not None else "") + ".")
+        if b:
+            bits.append(f"The lib covers {clock(b[0])}–{clock(b[1])}.")
+        else:
+            bits.append("The lib is empty so far.")
+        try:
+            tail = [l for l in (live_dir / "ingest.log").read_text().splitlines() if l.startswith("[episode]") or "Error" in l or "Traceback" in l][-1:]
+            if tail:
+                bits.append("Last log line: " + tail[0][:140])
+        except Exception:
+            pass
+        return {"text": " ".join(bits), "mood": "bot" if st.get("running") else "botUnsure", "citations": [], "evidence": [],
+                "grounding": "status", "latency_ms": 0, "action": "answer"}
+
     @app.get("/health")
     def health():
         b = footage_bounds(engine)
@@ -110,6 +135,9 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         if q.lower().rstrip("!?. ") in GREETING or q.lower().startswith(("hi ", "hey ", "hello ")):
             return {"text": "Hey — ask me about the cameras: who was where, when, what they were carrying, how many people, or what happened in a time window.",
                     "mood": "bot", "evidence": [], "grounding": "greeting", "latency_ms": 0}
+        from vi.agent import classify_scope
+        if classify_scope(q)[0] == "status":
+            return status_answer()
         b = footage_bounds(engine)
         now_ms = b[1] if b else int(time.time() * 1000)
         import concurrent.futures
