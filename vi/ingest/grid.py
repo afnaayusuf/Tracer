@@ -85,7 +85,7 @@ def seam_scores(gray: np.ndarray, rows: int, cols: int, band: int = 3) -> list[f
     return scores
 
 
-def detect_grid(frames: list[np.ndarray], min_ratio: float = 6.0) -> tuple[GridSpec | None, dict]:
+def detect_grid(frames: list[np.ndarray], min_ratio: float = 7.0) -> tuple[GridSpec | None, dict]:
     """Pick the layout with the MOST cells whose WEAKEST seam is still clearly a border (min seam
     ratio >= min_ratio). A 4×4 contains the 2×2's seams, so it qualifies only if its quarter seams
     are strong too; a 2×2 outranks 1×2 because its horizontal seam also qualifies.

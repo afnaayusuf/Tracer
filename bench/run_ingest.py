@@ -29,7 +29,7 @@ from vi.profiles import load_profile
 from vi.reid import HistogramEmbedder, crop_for_embedding, make_embedder
 from vi.schemas import Box, CamTime, Provenance, Tick, TubeSnapshot
 from vi.schemas.episode import CastMember, EpisodeStatus
-from vi.store import connect, load_episode_file
+from vi.store import IncrementalLoader, connect, load_episode_file
 from vi.tubes import TRACKERS, TubeLinker, grade_tube
 
 
@@ -85,6 +85,7 @@ def main() -> None:
     ap.add_argument("--max-width", type=int, default=0, help="decode width cap (0 = native); grids need native resolution")
     ap.add_argument("--out", default="data/episodes")
     ap.add_argument("--live-dir", default="data/live"); ap.add_argument("--live-every", type=int, default=4)
+    ap.add_argument("--flush-s", type=float, default=10.0, help="push the OPEN episodes' current state to the store this often (near-live lib)")
     ap.add_argument("--tiles", default="auto", help="one = homo BuF (every camera is the same space, one identity from the first frame); "
                     "auto = data/tiles.json if present (homo/hetero learned by /tiles/recompute) else per camera; none = per camera; or a JSON path")
     a = ap.parse_args()
@@ -136,6 +137,8 @@ def main() -> None:
                 return parse_sheet_reply(json.dumps([{"cell_id": i, "top_color": "orange", "description": "person", "confidence": 0.7} for i in range(len(ids))]), ids)
         vlm = _F()
     writer = EpisodeWriter(a.out)
+    inc = IncrementalLoader(engine)
+    last_flush_wall = time.time()
     ids = cell_ids(spec) if spec else [a.camera]
     from vi.fusion import TileMap
     tilemap = None
@@ -263,6 +266,29 @@ def main() -> None:
         cam_live[cam.camera_id] = len(live)
 
     cam_live: dict[str, int] = {}
+
+    def flush_open() -> None:
+        """near-live: current tube state of every open episode into its file, new lines into the store"""
+        n = 0
+        for cam in cams.values():
+            if cam.ep is None or cam.tracker is None:
+                continue
+            for tr in cam.tracker._tracks.values():
+                t = tr.tube
+                if t.class_label == "person" and cam.linker is not None:
+                    t.entity_id = cam.linker.entity_of(t.tube_id) or t.entity_id
+                    t.embedding = cam.linker.embedding_of(t.tube_id)
+                if t.class_label == "person":
+                    grade_tube(t, cam.w, cam.h, min_life_ms=int(profile.quality.min_life_s * 1000), min_height_frac=profile.quality.min_height_frac,
+                               border_px=profile.quality.border_px)
+                writer.write_tube_snapshot(cam.ep, t)
+            n += 1
+            try:
+                inc.flush(writer.path(cam.ep))
+            except Exception as e:
+                print(f"[flush] {cam.camera_id}: {type(e).__name__}: {str(e)[:100]}", flush=True)
+        stats["flushes"] += 1 if n else 0
+
     fr = None
     for fr in reader.frames():
         if pts0 is None:
@@ -302,6 +328,8 @@ def main() -> None:
                                                               "live_tubes": sum(cam_live.values()), "per_camera": cam_live, "now_ms": t_ms,
                                                               "episodes": stats["episodes"], "sheets": stats["sheets"],
                                                               "detect_ms_p50": round(float(np.median(detect_ms[-50:])), 1) if detect_ms else None}))
+        if a.flush_s and time.time() - last_flush_wall >= a.flush_s:
+            flush_open(); last_flush_wall = time.time()
         frames += 1
         if frames % 200 == 0:
             el = time.time() - t_wall0

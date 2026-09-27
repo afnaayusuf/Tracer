@@ -107,9 +107,9 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         else:
             bits.append("No ingest is running right now" + (f" (the last one exited with code {st['exit_code']})" if st.get("exit_code") is not None else "") + ".")
         if b:
-            bits.append(f"The lib covers {clock(b[0])}–{clock(b[1])}.")
+            bits.append(f"The lib covers {clock(b[0])}–{clock(b[1])}" + (f" (updated {max(0, (st['now_ms'] - b[1]) // 1000)} s of footage ago)." if st.get("now_ms") else "."))
         else:
-            bits.append("The lib is empty so far.")
+            bits.append("The lib is empty so far (the first flush comes about 10 s after the first person is seen).")
         try:
             tail = [l for l in (live_dir / "ingest.log").read_text().splitlines() if l.startswith("[episode]") or "Error" in l or "Traceback" in l][-1:]
             if tail:

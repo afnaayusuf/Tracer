@@ -108,3 +108,110 @@ def load_episode_file(engine: Engine, path: str | Path) -> dict:
         counts["custody"] += insert_ignore(conn, custody, custody_rows)
     counts["episode_id"] = header.episode_id  # type: ignore[assignment]
     return dict(counts)
+
+
+class IncrementalLoader:
+    """Applies only the new lines of an episode file each call, so an OPEN episode is queryable
+    while the ingest writes it (near-live). Idempotent with the full load that runs at close."""
+
+    def __init__(self, engine: Engine):
+        self.engine = engine
+        self._offset: dict[str, int] = {}
+        self._header: dict[str, EpisodeHeader] = {}
+
+    def flush(self, path: str | Path) -> dict:
+        from vi.schemas.episode import episode_record_adapter
+        path = Path(path)
+        if not path.exists():
+            return {}
+        start = self._offset.get(str(path), 0)
+        with path.open("rb") as f:
+            f.seek(start)
+            chunk = f.read()
+        if not chunk:
+            return {}
+        # only complete lines
+        last_nl = chunk.rfind(b"\n")
+        if last_nl < 0:
+            return {}
+        self._offset[str(path)] = start + last_nl + 1
+        records = []
+        for line in chunk[: last_nl + 1].splitlines():
+            if line.strip():
+                try:
+                    records.append(episode_record_adapter.validate_json(line))
+                except Exception:
+                    continue
+        header = self._header.get(str(path))
+        tick_rows, event_rows, patch_rows, tube_rows, custody_rows = [], [], [], [], []
+        close = None
+        t_end_max = None
+        for rec in records:
+            if isinstance(rec, EpisodeHeader):
+                header = rec; self._header[str(path)] = rec
+            elif isinstance(rec, TickRecord):
+                t = rec.tick
+                t_end_max = max(t_end_max or 0, t.t_end.corrected_ms())
+                tick_rows.append(dict(episode_id=rec.episode_id, camera_id=t.camera_id, tick_index=t.tick_index,
+                                      t_start_ms=t.t_start.corrected_ms(), t_end_ms=t.t_end.corrected_ms(), modality=t.modality.value,
+                                      tubes=[s.model_dump(mode="json") for s in t.tubes], event_ids=t.event_ids, scene_state=t.scene_state,
+                                      gate_energy=t.gate_energy))
+            elif isinstance(rec, EventRecord):
+                e = rec.event
+                event_rows.append(dict(event_id=e.event_id, episode_id=rec.episode_id, type=e.type.value, t_ms=e.t.corrected_ms(),
+                                       camera_id=e.camera_id, tile_id=e.tile_id, zone_id=e.zone_id, subject_tube_ids=e.subject_tube_ids,
+                                       subject_entity_ids=e.subject_entity_ids, object_ids=e.object_ids, payload=e.payload,
+                                       confidence=e.confidence, source=e.source, dedupe_key=e.dedupe_key))
+            elif isinstance(rec, TubeRecord):
+                t = rec.tube
+                tube_rows.append(dict(tube_id=t.tube_id, episode_id=rec.episode_id, camera_id=t.camera_id, tile_id=t.tile_id,
+                                      entity_id=t.entity_id or f"anon:{t.tube_id}", named=t.named, class_label=t.class_label, state=t.state.value,
+                                      born_ms=t.born.corrected_ms(), last_seen_ms=t.last_seen.corrected_ms(), box=t.box.model_dump(),
+                                      zone_ids=t.zone_ids, modality=t.modality.value, keyframe_refs=t.keyframe_refs,
+                                      attributes=t.attributes.model_dump(mode="json") if t.attributes else None,
+                                      merge_candidates=t.merge_candidates, quality=t.quality, quality_reason=t.quality_reason, embedding=t.embedding))
+            elif isinstance(rec, EpisodeClose):
+                close = rec
+        if header is None:
+            return {}
+        counts: dict[str, int] = {}
+        with self.engine.begin() as conn:
+            counts["episodes"] = insert_ignore(conn, episodes, [dict(
+                episode_id=header.episode_id, tile_id=header.tile_id, camera_ids=header.camera_ids, t0_ms=header.t0.corrected_ms(),
+                t1_ms=t_end_max or header.t0.corrected_ms(), status="open", kb_version=header.provenance.kb_version,
+                schema_version=header.provenance.schema_version)])
+            if t_end_max is not None or close is not None:
+                vals = {}
+                if t_end_max is not None:
+                    cur = conn.execute(select(episodes.c.t1_ms).where(episodes.c.episode_id == header.episode_id)).scalar()
+                    vals["t1_ms"] = max(cur or 0, t_end_max)
+                if close is not None:
+                    vals.update(t1_ms=close.t1.corrected_ms(), status=close.status.value)
+                conn.execute(update(episodes).where(episodes.c.episode_id == header.episode_id).values(**vals))
+            counts["ticks"] = insert_ignore(conn, ticks, tick_rows)
+            counts["events"] = insert_ignore(conn, events, event_rows)
+            counts["tubes"] = insert_ignore(conn, tubes, tube_rows)
+            latest: dict[str, dict] = {}
+            for r in tube_rows:
+                if r["tube_id"] not in latest or r["last_seen_ms"] >= latest[r["tube_id"]]["last_seen_ms"]:
+                    latest[r["tube_id"]] = r
+            for r in latest.values():
+                cur = conn.execute(select(tubes.c.last_seen_ms).where(tubes.c.tube_id == r["tube_id"])).scalar()
+                if cur is not None and r["last_seen_ms"] >= cur:
+                    conn.execute(update(tubes).where(tubes.c.tube_id == r["tube_id"]).values(
+                        last_seen_ms=r["last_seen_ms"], state=r["state"], box=r["box"], keyframe_refs=r["keyframe_refs"], attributes=r["attributes"],
+                        quality=r["quality"], quality_reason=r["quality_reason"], embedding=r["embedding"], entity_id=r["entity_id"]))
+            # entities: derive from the latest tube rows (upsert)
+            for r in latest.values():
+                e = dict(entity_id=r["entity_id"], camera_id=r["camera_id"], named=r["named"], class_label=r["class_label"], tube_ids=[r["tube_id"]],
+                         first_seen_ms=r["born_ms"], last_seen_ms=r["last_seen_ms"], best_keyframe_ref=(r["keyframe_refs"] or [None])[0],
+                         embedding=r["embedding"], quality=r["quality"])
+                insert_ignore(conn, entities, [e])
+                cur = conn.execute(select(entities).where(entities.c.entity_id == e["entity_id"])).first()
+                if cur is not None:
+                    cur = dict(cur._mapping)
+                    conn.execute(update(entities).where(entities.c.entity_id == e["entity_id"]).values(
+                        tube_ids=sorted(set((cur["tube_ids"] or []) + [r["tube_id"]])), first_seen_ms=min(cur["first_seen_ms"], r["born_ms"]),
+                        last_seen_ms=max(cur["last_seen_ms"] or 0, r["last_seen_ms"]), best_keyframe_ref=cur["best_keyframe_ref"] or e["best_keyframe_ref"],
+                        embedding=cur.get("embedding") or e["embedding"], quality="ok" if "ok" in (cur.get("quality"), r["quality"]) else "low"))
+        return counts

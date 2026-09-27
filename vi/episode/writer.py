@@ -75,6 +75,12 @@ class EpisodeWriter:
     def write_tube(self, episode_id: str, tube: Tube) -> bool:
         return self._append(episode_id, f"tube:{tube.tube_id}", TubeRecord(episode_id=episode_id, tube=tube))
 
+    def write_tube_snapshot(self, episode_id: str, tube: Tube) -> bool:
+        """The live lane writes a tube's CURRENT state every flush (last_seen advancing, entity id,
+        description). Keyed by last_seen so each flush appends at most one record per tube; the
+        loader keeps the latest."""
+        return self._append(episode_id, f"tube:{tube.tube_id}:{tube.last_seen.corrected_ms()}", TubeRecord(episode_id=episode_id, tube=tube))
+
     def close(self, episode_id: str, t1: CamTime, status: EpisodeStatus, cast: list[CastMember]) -> bool:
         ok = self._append(episode_id, "close", EpisodeClose(episode_id=episode_id, t1=t1, status=status, cast=cast))
         self._open.pop(episode_id, None)

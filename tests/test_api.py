@@ -60,3 +60,38 @@ def test_followups_and_deadline(store_with_footage):
     assert r["grounding"] == "ok" and r["window"] and r["action"] in ("answer", "clarify")
     r = c.post("/ask", json={"question": "yes exactly", "history": [{"q": "who was there just now?", "a": "Which person?", "action": "clarify"}]}).json()
     assert r["action"] in ("answer", "clarify") and r["grounding"] != "off_topic"
+
+
+def test_open_episode_is_queryable_while_it_grows(tmp_path):
+    """The live lane: after two flushes, footage bounds and the cast reflect the open episode."""
+    from vi.agent import footage_bounds
+    from vi.agent.tools import coverage_window
+    from vi.episode import EpisodeWriter
+    from vi.schemas import Box, CamTime, Provenance, Tick, Tube, TubeSnapshot, TubeState
+    from vi.schemas.episode import CastMember, EpisodeStatus
+    from vi.store import IncrementalLoader, connect
+    engine = connect(); inc = IncrementalLoader(engine)
+    w = EpisodeWriter(tmp_path / "ep"); prov = Provenance(kb_version=1, pipeline_git="t")
+    T0 = 1_790_000_000_000
+    ep = w.open("floor", ["cam1"], CamTime(cam_utc_ms=T0), prov)
+    tube = Tube(tube_id="cam1:0:1", camera_id="cam1", class_label="person", state=TubeState.active, born=CamTime(cam_utc_ms=T0),
+                last_seen=CamTime(cam_utc_ms=T0), box=Box(x1=10, y1=10, x2=50, y2=130), max_height_px=120, entity_id="site:E1")
+    for k in range(1, 5):
+        t = T0 + k * 250
+        tube.last_seen = CamTime(cam_utc_ms=t)
+        w.write_tick(ep, Tick(camera_id="cam1", tick_index=k, t_start=CamTime(cam_utc_ms=t), t_end=CamTime(cam_utc_ms=t + 250),
+                              tubes=[TubeSnapshot(tube_id=tube.tube_id, class_label="person", state=TubeState.active, box=tube.box)], provenance=prov))
+        if k in (2, 4):
+            w.write_tube_snapshot(ep, tube); inc.flush(w.path(ep))
+            b = footage_bounds(engine)
+            assert b is not None and b[1] >= t                                    # bounds advance while open
+            rows = coverage_window(engine, b[0], b[1])
+            assert rows and rows[0]["entity_id"] == "site:E1" and rows[0]["last_seen_ms"] == t
+    from vi.agent import episodes_in
+    assert episodes_in(engine, T0, T0 + 5000)[0]["status"] == "open"
+    w.write_tube(ep, tube); w.close(ep, CamTime(cam_utc_ms=T0 + 1500), EpisodeStatus.closed, [CastMember(tube_ids=[tube.tube_id], class_label="person")])
+    inc.flush(w.path(ep))
+    assert episodes_in(engine, T0, T0 + 5000)[0]["status"] == "closed"
+    from vi.store import load_episode_file
+    load_episode_file(engine, w.path(ep))                                          # the full load at close is idempotent on top
+    assert len(coverage_window(engine, T0, T0 + 5000)) == 1
