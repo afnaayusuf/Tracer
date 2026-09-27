@@ -19,7 +19,8 @@ WRITER_PROMPT = (
     "This image is a grid of cells; each cell shows one person cropped from a camera, with the cell number in the "
     "yellow strip under it (the strip is a label, not part of the scene). For EVERY cell, describe that person only. "
     "Reply with a JSON array, one object per cell, no prose:\n"
-    '[{"cell_id": 0, "top_color": colour of the most visible upper-body garment (a vest counts), one of ' + str(COLORS) + ' or null, '
+    '[{"cell_id": 0, "is_person": true or false (false if the cell shows no person: a box, a chair, a wall, a reflection), '
+    '"top_color": colour of the most visible upper-body garment (a vest counts), one of ' + str(COLORS) + ' or null, '
     '"bottom_color": same or null, '
     '"headwear": short text or null, "carried_item": short text or null, "role": short text or null, '
     '"description": at most 12 words, "confidence": 0-1}]\n'
@@ -77,6 +78,8 @@ def parse_sheet_reply(text: str, tube_ids: list[str], modality: Modality = Modal
         if not (0 <= cid < len(tube_ids)):
             continue
         desc_bits = [str(it.get("description") or "")[:120]]
+        if it.get("is_person") is False:
+            desc_bits.insert(0, "NOT A PERSON")
         if it.get("headwear"):
             desc_bits.append(f"headwear: {str(it['headwear'])[:40]}")
         if it.get("role"):

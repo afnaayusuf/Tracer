@@ -341,8 +341,13 @@ def world_groups(rows: list[dict], sim_thr: float = 0.85, max_gap_ms: int = 60_0
             gap = max(a["first_seen_ms"], b["first_seen_ms"]) - min(a["last_seen_ms"], b["last_seen_ms"])
             if gap > max_gap_ms:
                 continue
-            if same_tile(a, b) and looks_compatible(a, b):
-                proposals.append((2.0 - min(1.0, max(0, gap) / max_gap_ms), a["entity_id"], b["entity_id"]))   # rule 2
+            if same_tile(a, b):
+                overlapping = gap <= -3000                            # present at the same time for >= 3 s
+                # rule 2: in one space, two people present together would be co-visible on some camera; they were not,
+                # so they are one person, whatever the crops look like (a top-down view over white boxes is not a white top).
+                # For sequential sightings (no overlap) looks must be compatible.
+                if overlapping or looks_compatible(a, b):
+                    proposals.append((2.0 - min(1.0, max(0, gap) / max_gap_ms) + (1.0 if overlapping else 0.0), a["entity_id"], b["entity_id"]))
                 continue
             if set(a.get("cameras", [])) & set(b.get("cameras", [])) or not looks_compatible(a, b):
                 continue
@@ -408,6 +413,15 @@ def entities_present_window(engine: Engine, t_start_ms: int, t_end_ms: int, min_
     return {"min_coverage": min_coverage, "count": len(ids), "entity_ids": ids, "coverage": {r["entity_id"]: r["coverage"] for r in rows}}
 
 
+def world_members(engine: Engine, t_start_ms: int, t_end_ms: int, camera_id: str | None = None) -> dict[str, list[str]]:
+    cast = coverage_window(engine, t_start_ms, t_end_ms, camera_id=camera_id)
+    worlds = world_groups(cast, tile_map=load_tile_map())
+    out: dict[str, list[str]] = {}
+    for eid, w in worlds.items():
+        out.setdefault(w, []).append(eid)
+    return out
+
+
 def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str = "UTC", max_chars: int = 7000,
                   max_events: int = 120, camera_id: str | None = None) -> str:
     """Compact script for a time window across episodes: absolute clock times, confirmed cast with
@@ -427,17 +441,19 @@ def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str =
     hard = hard_evidence_people(cast)
     lines = [f"WINDOW {clock(t_start_ms)}–{clock(t_end_ms)} ({(t_end_ms - t_start_ms) / 60000:.1f} min) | episodes {len(eps)} | "
              + (f"camera {camera_id}" if camera_id else f"cameras {','.join(all_cams)}"),
-             f"CAST: {n_people} people" + (f" ({len(cast)} camera tracks joined by W-id; hard evidence: at most {hard} seen at once by any one camera)"
-                                            if len(all_cams) > 1 else "")]
+             f"PEOPLE: {n_people}" + (f"  (hard evidence: at most {hard} seen at once by any one camera; {len(cast)} camera tracks in total)"
+                                     if len(all_cams) > 1 else ""),
+             "  Each person has a W-id. Track ids like site:E3 or cam02:E1 are the SAME person seen by a camera; they are never places."]
     by_world: dict[str, list[dict]] = {}
     for c in cast:
         by_world.setdefault(worlds[c["entity_id"]], []).append(c)
     for w, members in by_world.items():
-        if len(all_cams) > 1:
-            lines.append(f"  {w}: " + " + ".join(f"{m['entity_id']} on {','.join(m['cameras'])}" for m in members))
-        for c in members:
-            lines.append(f"    {c['entity_id']}  seen {clock(c['first_seen_ms'])}–{clock(c['last_seen_ms'])}  coverage {c['coverage']:.0%}"
-                         + (f"  looks: {c['looks']}" if c.get("looks") else "") + (f"  keyframe {c['keyframe']}" if c.get("keyframe") else ""))
+        first = min(m["first_seen_ms"] for m in members); last = max(m["last_seen_ms"] for m in members)
+        cams = sorted({c for m in members for c in m["cameras"]})
+        looks = next((m["looks"] for m in sorted(members, key=lambda m: -(m["last_seen_ms"] - m["first_seen_ms"])) if m.get("looks") and not str(m["looks"]).startswith("NOT A PERSON")), None)
+        lines.append(f"  {w}  person  seen {clock(first)}–{clock(last)}  on {','.join(cams)}" + (f"  looks: {looks}" if looks else ""))
+        lines.append("      tracks: " + "; ".join(f"{m['entity_id']} ({','.join(m['cameras'])} {clock(m['first_seen_ms'])}–{clock(m['last_seen_ms'])})" for m in members)
+                     + (f"  keyframe {members[0]['keyframe']}" if members[0].get("keyframe") else ""))
     ev_conds = [events.c.t_ms >= t_start_ms, events.c.t_ms <= t_end_ms]
     if camera_id:
         ev_conds.append(events.c.camera_id == camera_id)

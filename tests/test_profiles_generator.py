@@ -227,7 +227,7 @@ def test_grid_autodetect_and_cross_camera_fusion(tmp_path):
     r = count_entities_window(engine, b[0], b[1])
     assert r["camera_entities"] == 4 and r["people"] == 1 and len(r["world_groups"]) == 1        # one man, four cameras
     script = window_script(engine, b[0], b[1])
-    assert "CAST: 1 people (4 camera tracks" in script and "W1: " in script
+    assert "PEOPLE: 1" in script and "4 camera tracks in total" in script and "W1  person" in script and "tracks: " in script
     res = ask_window(engine, "How many people were there?", FakeBackend(), b[1])
     assert res["final"]["action"] == "answer"
 
@@ -342,3 +342,28 @@ def test_status_questions_are_answered_from_the_ingest(tmp_path):
     from vi.agent import classify_scope
     assert classify_scope("is it working..?")[0] == "status" and classify_scope("right now, is the lib is updating..")[0] == "status"
     assert classify_scope("who was at the counter?")[0] == "ok"
+
+
+def test_homo_time_overlap_beats_looks_but_sequential_still_needs_them():
+    from vi.agent.tools import world_groups
+    def row(eid, cams, a, b, color):
+        return {"entity_id": eid, "cameras": cams, "first_seen_ms": a, "last_seen_ms": b, "top_color": color, "embedding": None,
+                "cam_intervals": {c: [(a, b)] for c in cams}}
+    # the man from the front (blue) and from above over white boxes (white), at the same time, different cameras
+    w = world_groups([row("site:E1", ["cam01"], 0, 60000, "blue"), row("site:E2", ["cam02"], 10000, 40000, "white")])
+    assert len(set(w.values())) == 1
+    # sequential (no overlap) with different looks: two people
+    w2 = world_groups([row("site:E1", ["cam01"], 0, 20000, "blue"), row("site:E3", ["cam02"], 30000, 50000, "red")])
+    assert len(set(w2.values())) == 2
+
+
+def test_writer_not_a_person_marks_the_tube_low():
+    from vi.writer import parse_sheet_reply
+    from vi.tubes import grade_tube
+    from vi.schemas import Box, CamTime, Tube
+    r = parse_sheet_reply('[{"cell_id": 0, "is_person": false, "description": "a cardboard box on a counter", "confidence": 0.9}]', ["t0"])
+    assert r.cells[0].attributes.description.startswith("NOT A PERSON")
+    t = Tube(tube_id="c1:0:9", camera_id="c1", class_label="person", born=CamTime(cam_utc_ms=0), last_seen=CamTime(cam_utc_ms=60000),
+             box=Box(x1=100, y1=100, x2=160, y2=260), max_height_px=160, quality="low", quality_reason="writer: not a person")
+    grade_tube(t, 1280, 720)
+    assert t.quality == "low" and t.quality_reason == "writer: not a person"      # geometry does not overrule the VLM

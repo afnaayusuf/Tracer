@@ -242,7 +242,11 @@ def main() -> None:
                 if res is not None:
                     by = {c.tube_id: c.attributes for c in res.cells}
                     for t in todo:
-                        if t.tube_id in by and by[t.tube_id].confidence > 0: t.attributes = by[t.tube_id]
+                        if t.tube_id in by and by[t.tube_id].confidence > 0:
+                            t.attributes = by[t.tube_id]
+                            if (by[t.tube_id].description or "").startswith("NOT A PERSON"):
+                                t.quality, t.quality_reason = "low", "writer: not a person"
+                                stats["writer_rejections"] += 1
                 for t in todo: cam.described.add(t.tube_id)
                 stats["sheets"] += 1
         cam.ep_tubes += closed

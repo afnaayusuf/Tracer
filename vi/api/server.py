@@ -154,7 +154,14 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         text = f.get("text") or f.get("question") or ""
         unsure = f.get("action") == "clarify" or f.get("handled_by") in ("scope", "time") or not f.get("cited", False)
         evidence = []
-        for c in f.get("citations", [])[:6]:
+        cites = list(f.get("citations", []))
+        if any(c.startswith("W") and c[1:].isdigit() for c in cites) and r.get("window_ms"):
+            from vi.agent.tools import world_members
+            members = world_members(engine, r["window_ms"][0], r["window_ms"][1], r.get("camera_id"))
+            for c in list(cites):
+                if c in members:
+                    cites += members[c]
+        for c in cites[:12]:
             if ":E" not in c and "anon:" not in c:
                 continue
             try:

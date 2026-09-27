@@ -12,6 +12,8 @@ def grade_tube(tube: Tube, frame_w: int, frame_h: int, median_height_px: float |
     """E-DET-01 / resolution ceiling: a tube that lived under 1.5 s, is under 48 px tall, or was
     born hugging the frame border is real evidence of *something*, not a confirmed person. It
     stays in the store, flagged, so the script can count it apart."""
+    if tube.quality_reason and tube.quality_reason.startswith("writer:"):
+        return tube                                   # the VLM said this crop is not a person; geometry cannot overrule that
     life = tube.last_seen.corrected_ms() - tube.born.corrected_ms()
     b = tube.box
     reasons = []
