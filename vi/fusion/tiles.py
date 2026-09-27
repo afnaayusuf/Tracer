@@ -15,10 +15,18 @@ import numpy as np
 
 @dataclass
 class TileMap:
+    """The BuF's structure. homo: one tile, every camera in it. hetero: several tiles plus the
+    adjacency graph (which tiles hand people to which, and how long the walk takes)."""
     tiles: dict[str, list[str]] = field(default_factory=dict)     # tile id -> cameras
-    affinity: dict[str, float] = field(default_factory=dict)       # "camA|camB" -> rate
+    affinity: dict[str, float] = field(default_factory=dict)       # "camA|camB" -> simultaneous-match rate
+    adjacency: dict[str, dict] = field(default_factory=dict)       # "T1|T2" -> {"median_gap_ms", "max_gap_ms", "handoffs"}
     evidence: dict[str, dict] = field(default_factory=dict)
+    kind: str = "auto"                                              # homo | hetero | auto
     version: int = 1
+
+    @classmethod
+    def homo(cls, cameras: list[str]) -> "TileMap":
+        return cls(tiles={"T1": sorted(cameras)}, kind="homo")
 
     def tile_of(self, camera_id: str) -> str:
         for t, cams in self.tiles.items():
@@ -26,9 +34,20 @@ class TileMap:
                 return t
         return camera_id                                            # unassigned camera: its own tile
 
+    def relation(self, cam_a: str, cam_b: str) -> tuple[str, int]:
+        """('same', 0) | ('adjacent', max_gap_ms) | ('none', 0) between two cameras."""
+        ta, tb = self.tile_of(cam_a), self.tile_of(cam_b)
+        if ta == tb:
+            return "same", 0
+        key = f"{min(ta, tb)}|{max(ta, tb)}"
+        if key in self.adjacency:
+            return "adjacent", int(self.adjacency[key].get("max_gap_ms", 60_000))
+        return "none", 0
+
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps({"tiles": self.tiles, "affinity": self.affinity, "evidence": self.evidence, "version": self.version}, indent=1))
+        Path(path).write_text(json.dumps({"tiles": self.tiles, "affinity": self.affinity, "adjacency": self.adjacency,
+                                          "evidence": self.evidence, "kind": self.kind, "version": self.version}, indent=1))
 
     @classmethod
     def load(cls, path: str | Path) -> "TileMap | None":
@@ -36,7 +55,8 @@ class TileMap:
         if not p.exists():
             return None
         d = json.loads(p.read_text())
-        return cls(tiles=d.get("tiles", {}), affinity=d.get("affinity", {}), evidence=d.get("evidence", {}), version=d.get("version", 1))
+        return cls(tiles=d.get("tiles", {}), affinity=d.get("affinity", {}), adjacency=d.get("adjacency", {}),
+                   evidence=d.get("evidence", {}), kind=d.get("kind", "auto"), version=d.get("version", 1))
 
 
 def camera_affinity(entities: list[dict], sim_thr: float = 0.85, min_overlap_ms: int = 1500) -> dict[str, dict]:
@@ -88,7 +108,36 @@ def discover_tiles(entities: list[dict], cameras: list[str] | None = None, sim_t
     for c in cams:
         groups.setdefault(find(c), []).append(c)
     tiles = {f"T{i + 1}": sorted(members) for i, (_, members) in enumerate(sorted(groups.items(), key=lambda kv: min(kv[1])))}
-    return TileMap(tiles=tiles, affinity={k: v["rate"] for k, v in aff.items()}, evidence=aff)
+    tm = TileMap(tiles=tiles, affinity={k: v["rate"] for k, v in aff.items()}, evidence=aff,
+                 kind="homo" if len(tiles) == 1 and len(cams) > 1 else ("hetero" if len(tiles) > 1 else "auto"))
+    tm.adjacency = tile_adjacency(entities, tm, sim_thr)
+    return tm
+
+
+def tile_adjacency(entities: list[dict], tm: TileMap, sim_thr: float = 0.85, max_travel_ms: int = 180_000,
+                   min_handoffs: int = 2) -> dict[str, dict]:
+    """Hand-offs between tiles: a person lost on tile A and matched on tile B shortly after, with
+    no overlap. Enough of them make the tiles adjacent, with the observed travel time as the window."""
+    by_tile: dict[str, list[dict]] = {}
+    for e in entities:
+        if e.get("embedding"):
+            by_tile.setdefault(tm.tile_of(e["camera_id"]), []).append(e)
+    out: dict[str, dict] = {}
+    for a, b in combinations(sorted(by_tile), 2):
+        gaps = []
+        for ea in by_tile[a]:
+            va = np.asarray(ea["embedding"], np.float32)
+            for eb in by_tile[b]:
+                gap = max(ea["first_seen_ms"], eb["first_seen_ms"]) - min(ea["last_seen_ms"], eb["last_seen_ms"])
+                if gap <= 0 or gap > max_travel_ms:
+                    continue
+                vb = np.asarray(eb["embedding"], np.float32)
+                if va.shape == vb.shape and float(va @ vb) / (float(np.linalg.norm(va)) * float(np.linalg.norm(vb)) + 1e-8) >= sim_thr:
+                    gaps.append(gap)
+        if len(gaps) >= min_handoffs:
+            gaps.sort()
+            out[f"{a}|{b}"] = {"handoffs": len(gaps), "median_gap_ms": int(gaps[len(gaps) // 2]), "max_gap_ms": int(min(max_travel_ms, gaps[-1] * 1.5 + 5000))}
+    return out
 
 
 def entities_for_affinity(engine) -> list[dict]:

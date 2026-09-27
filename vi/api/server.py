@@ -46,6 +46,9 @@ class IngestIn(BaseModel):
     episode_min: float = 10.0
     grid: str | None = "auto"        # "auto" detects an NVR multiplex layout from the seams; "2x2"/"4x4" to force; null = single camera
     max_width: int = 0
+    tiles: str = "auto"              # "one" = homo BuF (all cameras one space); "auto" = learned map if present; "none" = per camera
+    auto_tiles_after_min: float = 5  # with tiles="auto" and no map yet: learn the map after this much footage and restart seamlessly
+    skip_s: float = 0
 
 
 def create_app(db_url: str | None = None, backend_name: str | None = None, model: str | None = None,
@@ -63,6 +66,7 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
     app = FastAPI(title="vi-engine")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     state = {"backend": None, "ingest": None, "started": time.time(), "model": model, "backend_name": backend_name}
+    tiles_path = Path(os.environ.get("VI_TILES", "data/tiles.json"))
 
     def backend():
         if state["backend"] is None:
@@ -172,7 +176,10 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         if state["ingest"] is not None and state["ingest"].poll() is None:
             return {"started": False, "reason": "already running", **ingest_status()}
         cmd = [sys.executable, "bench/run_ingest.py", "--source", inp.source, "--db", db_url, "--profile", inp.profile, "--reid", inp.reid,
-               "--writer", inp.writer, "--model", inp.model, "--fps", str(inp.fps), "--episode-min", str(inp.episode_min), "--live-dir", str(live_dir)]
+               "--writer", inp.writer, "--model", inp.model, "--fps", str(inp.fps), "--episode-min", str(inp.episode_min), "--live-dir", str(live_dir),
+               "--tiles", inp.tiles]
+        if inp.skip_s:
+            cmd += ["--skip-s", str(inp.skip_s)]
         if inp.start_time:
             cmd += ["--start-time", inp.start_time]
         if inp.grid:
@@ -184,7 +191,42 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         live_dir.mkdir(parents=True, exist_ok=True)
         log = open(live_dir / "ingest.log", "a")
         state["ingest"] = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=os.getcwd())
-        return {"started": True, "pid": state["ingest"].pid, "cmd": " ".join(cmd)}
+        state["ingest_params"] = inp
+        if inp.tiles == "auto" and not tiles_path.exists() and inp.auto_tiles_after_min > 0:
+            import threading
+            threading.Thread(target=_auto_tiles, args=(inp, state["ingest"]), daemon=True).start()
+        return {"started": True, "pid": state["ingest"].pid, "cmd": " ".join(cmd), "auto_tiles": inp.tiles == "auto" and not tiles_path.exists()}
+
+    def _auto_tiles(inp: IngestIn, proc) -> None:
+        """Phase 2 without anyone typing: after N minutes of footage, learn the map; if cameras group
+        (homo or hetero), restart the ingest with the map from where it got to."""
+        from vi.fusion import discover_tiles
+        from vi.fusion.tiles import entities_for_affinity
+        from vi.agent.tools import cameras_in_store
+        deadline = time.time() + 3 * 3600
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(15)
+            try:
+                st = json.loads((live_dir / "status.json").read_text())
+            except Exception:
+                continue
+            if st.get("footage_s", 0) < inp.auto_tiles_after_min * 60:
+                continue
+            ents = entities_for_affinity(engine)
+            tm = discover_tiles(ents, cameras=cameras_in_store(engine))
+            grouped = any(len(c) > 1 for c in tm.tiles.values())
+            tm.save(tiles_path)
+            (live_dir / "auto_tiles.json").write_text(json.dumps({"at_footage_s": st.get("footage_s"), "tiles": tm.tiles, "adjacency": tm.adjacency,
+                                                                 "kind": tm.kind, "entities_used": len(ents), "restarted": grouped}))
+            if grouped and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=30)
+                except Exception:
+                    pass
+                inp2 = inp.model_copy(update={"skip_s": float(st.get("footage_s", 0)), "tiles": "auto", "auto_tiles_after_min": 0})
+                ingest_start(inp2)
+            return
 
     @app.post("/ingest/stop")
     def ingest_stop():
@@ -197,8 +239,6 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
     @app.get("/ingest/status")
     def ingest_state():
         return ingest_status()
-
-    tiles_path = Path(os.environ.get("VI_TILES", "data/tiles.json"))
 
     @app.get("/tiles")
     def tiles():

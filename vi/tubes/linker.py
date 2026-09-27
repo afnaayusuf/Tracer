@@ -43,9 +43,15 @@ class TubeLinker:
     def __init__(self, camera_id: str, sim_thr: float = 0.88, max_gap_ms: int = 30_000,
                  max_jump_px: float = 400.0, ema_alpha: float = 0.3, exemplars: int = 5,
                  exited_sim_thr: float = 0.90, near_sim_thr: float = 0.85, near_gap_ms: int = 5000,
-                 near_jump_px: float = 200.0, aux_thr: float = 0.80, cross_camera_sim_thr: float = 0.85):
-        self.camera_id = camera_id          # for a tile linker this is the tile id; tubes carry their own camera_id
+                 near_jump_px: float = 200.0, aux_thr: float = 0.80, cross_camera_sim_thr: float = 0.85,
+                 relation=None, unambiguous_sim_thr: float = 0.70):
+        self.camera_id = camera_id          # for a site/tile linker this is the tile or site id; tubes carry their own camera_id
         self.cross_camera_sim_thr = cross_camera_sim_thr
+        # relation(cam_a, cam_b) -> ("same", 0) | ("adjacent", max_gap_ms) | ("none", 0); None = every camera is the same tile
+        self.relation = relation
+        # a homo BuF with one person live on the other cameras and a new track here: the assignment is unambiguous,
+        # and a top-down view of the same man does not look like his frontal view to a general embedding
+        self.unambiguous_sim_thr = unambiguous_sim_thr
         self.sim_thr = sim_thr
         # a tube reappearing within a few seconds and a couple of body-widths of where one vanished
         # is the same person unless appearance says otherwise: the bar drops to near_sim_thr there
@@ -91,9 +97,14 @@ class TubeLinker:
         for e in self._entities.values():
             if tube.camera_id in e.live_by_cam:               # already seen on THIS camera right now: a different person here
                 continue
-            if e.cameras and tube.camera_id not in e.cameras:  # another camera of the tile: concurrent sighting is allowed
-                if e.live_by_cam or e.lost_at_ms is None or t_ms - e.lost_at_ms <= self.max_gap_ms:
-                    out.append(e)                            # no distance gate across cameras
+            if e.cameras and tube.camera_id not in e.cameras:  # another camera
+                rel, max_gap = ("same", 0) if self.relation is None else self.relation(tube.camera_id, next(iter(e.cameras)))
+                if rel == "same":                            # same tile: concurrent sighting is the same person
+                    if e.live_by_cam or e.lost_at_ms is None or t_ms - e.lost_at_ms <= self.max_gap_ms:
+                        out.append(e)                        # no distance gate across cameras
+                elif rel == "adjacent":                      # hand-off: must have left the other tile, within the travel time
+                    if not e.live_by_cam and e.lost_at_ms is not None and 0 <= t_ms - e.lost_at_ms <= max_gap:
+                        out.append(e)
                 continue
             if e.lost_at_ms is None or t_ms - e.lost_at_ms > self.max_gap_ms:
                 continue
@@ -121,6 +132,11 @@ class TubeLinker:
             best = max(cands, key=lambda e: self._sim(e, emb))
             sim = self._sim(best, emb)
             thr = self._thr(best, tube, t_ms)
+            cross_cands = [e for e in cands if tube.camera_id not in e.cameras]
+            live_elsewhere = [e for e in self._entities.values() if e.live_by_cam and tube.camera_id not in e.live_by_cam]
+            if (len(cross_cands) == 1 and best is cross_cands[0] and len(live_elsewhere) == 1
+                    and (self.relation is None or self.relation(tube.camera_id, next(iter(best.cameras)))[0] == "same")):
+                thr = min(thr, self.unambiguous_sim_thr)     # the only person in the tile, seen from a new angle
             if sim >= thr:
                 prev = best.tube_ids[-1]
                 cross = tube.camera_id not in best.cameras
@@ -138,6 +154,7 @@ class TubeLinker:
                              type=EventType.relink, t=CamTime(cam_utc_ms=t_ms), camera_id=self.camera_id,
                              subject_tube_ids=[prev, tube.tube_id], subject_entity_ids=[best.entity_id],
                              payload={"similarity": round(sim, 3), "threshold": round(thr, 2), "cross_camera": cross,
+                                      "handoff": bool(cross and self.relation is not None and self.relation(tube.camera_id, prev.split(":")[0])[0] == "adjacent"),
                                       "gap_ms": t_ms - (tube.born.corrected_ms()), "absorbed_tube": absorbed},
                              confidence=min(1.0, sim))
         self._new_entity(tube, emb, aux)

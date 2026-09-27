@@ -190,3 +190,34 @@ def test_tile_linker_joins_the_same_person_across_cameras_but_not_two_people_on_
     assert lk.entity_of("cam02:500:1") == lk.entity_of("cam01:0:1") == "T1:E1" and lk.absorbed == []
     t_c = tb("cam01:600:2", "cam01", 700, t=600)                         # a look-alike on cam01 while E1 is live on cam01: a second person
     assert lk.on_birth(t_c, a, 600) is None and lk.entities == 2
+
+
+def test_relation_aware_linker_handoff_and_unambiguous_assignment():
+    from vi.fusion import TileMap
+    from vi.schemas import Box, CamTime, Tube
+    def tb(tid, cam, x, t=0):
+        return Tube(tube_id=tid, camera_id=cam, class_label="person", born=CamTime(cam_utc_ms=t), last_seen=CamTime(cam_utc_ms=t),
+                    box=Box(x1=x, y1=100, x2=x + 40, y2=220))
+    tm = TileMap(tiles={"T1": ["cam01", "cam02"], "T2": ["cam03"]}, adjacency={"T1|T2": {"max_gap_ms": 20_000}}, kind="hetero")
+    a = unit(1); b = unit(11); b -= (b @ a) * a; b /= np.linalg.norm(b)
+    topdown = a * 0.75 + b * 0.66                                   # cosine 0.75: the same man from above
+    lk = TubeLinker("site", relation=tm.relation, cross_camera_sim_thr=0.85, unambiguous_sim_thr=0.70)
+    t1 = tb("cam01:0:1", "cam01", 300); lk.on_birth(t1, a, 0); t1.state = TubeState.active; lk.on_state(t1, 500)
+    # same tile, the only person in it, seen from cam02 from above: unambiguous -> linked at the relaxed bar
+    ev = lk.on_birth(tb("cam02:500:1", "cam02", 900, t=500), topdown, 500)
+    assert ev is not None and ev.payload["cross_camera"] and ev.payload["threshold"] == 0.7 and lk.entities == 1
+    # a second person appears on cam01 while E1 is live there: separate entity, so the tile is no longer unambiguous
+    t3 = tb("cam01:600:2", "cam01", 700, t=600); lk.on_birth(t3, b, 600); t3.state = TubeState.active; lk.on_state(t3, 600)
+    assert lk.entities == 2
+    # hand-off to the adjacent tile: E1 leaves cam01/cam02 (lost), appears on cam03 8 s later
+    for t in (t1,):
+        t.state = TubeState.lost; lk.on_close(t, 2000)
+    t2 = lk._entities[lk.entity_of("cam02:500:1")]
+    t2.live_by_cam.clear(); t2.lost_at_ms = 2000
+    ev = lk.on_birth(tb("cam03:10000:1", "cam03", 100, t=10000), a, 10000)
+    assert ev is not None and ev.payload["handoff"] and lk.entity_of("cam03:10000:1") == "site:E1"
+    # a non-adjacent tile never links, however alike
+    tm2 = TileMap(tiles={"T1": ["cam01"], "T9": ["cam09"]}, kind="hetero")
+    lk2 = TubeLinker("site", relation=tm2.relation)
+    u = tb("cam01:0:1", "cam01", 300); lk2.on_birth(u, a, 0); u.state = TubeState.lost; lk2.on_close(u, 1000)
+    assert lk2.on_birth(tb("cam09:3000:1", "cam09", 300, t=3000), a, 3000) is None and lk2.entities == 2

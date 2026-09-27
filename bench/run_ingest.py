@@ -76,7 +76,8 @@ def main() -> None:
     ap.add_argument("--start-time", default=None); ap.add_argument("--profile", default="common")
     ap.add_argument("--model", default="nano"); ap.add_argument("--fps", type=float, default=4.0)
     ap.add_argument("--threshold", type=float, default=0.1)
-    ap.add_argument("--reid", default="siglip"); ap.add_argument("--writer", choices=["none", "qwen", "fake"], default="none")
+    ap.add_argument("--reid", default="siglip"); ap.add_argument("--writer", choices=["none", "qwen", "fake", "auto"], default="auto",
+                    help="auto = qwen when the source has <= 8 cameras (descriptions cost one call per sighting), none above")
     ap.add_argument("--writer-model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--zones", default=None, help="zones JSON (single camera); grid cameras get border exits + label media zones")
     ap.add_argument("--episode-min", type=float, default=10.0); ap.add_argument("--quiet-close-s", type=float, default=30.0)
@@ -84,7 +85,8 @@ def main() -> None:
     ap.add_argument("--max-width", type=int, default=0, help="decode width cap (0 = native); grids need native resolution")
     ap.add_argument("--out", default="data/episodes")
     ap.add_argument("--live-dir", default="data/live"); ap.add_argument("--live-every", type=int, default=4)
-    ap.add_argument("--tiles", default="auto", help="tile map JSON (cameras that see the same area share one linker); auto = data/tiles.json if present; none")
+    ap.add_argument("--tiles", default="auto", help="one = homo BuF (every camera is the same space, one identity from the first frame); "
+                    "auto = data/tiles.json if present (homo/hetero learned by /tiles/recompute) else per camera; none = per camera; or a JSON path")
     a = ap.parse_args()
 
     profile = load_profile(a.profile)
@@ -116,6 +118,9 @@ def main() -> None:
     embedder = make_embedder(a.reid) if a.reid != "none" else None
     aux = HistogramEmbedder() if embedder and embedder.name != "hist" else None
     vlm = None
+    if a.writer == "auto":
+        a.writer = "qwen" if n_cams <= 8 else "none"
+        print(f"[writer] auto -> {a.writer} ({n_cams} camera(s))", flush=True)
     if a.writer == "qwen":
         try:
             from vi.writer import WriterVLM
@@ -134,16 +139,18 @@ def main() -> None:
     ids = cell_ids(spec) if spec else [a.camera]
     from vi.fusion import TileMap
     tilemap = None
-    if a.tiles and a.tiles != "none":
+    if a.tiles == "one":
+        tilemap = TileMap.homo(ids)
+    elif a.tiles and a.tiles != "none":
         tilemap = TileMap.load("data/tiles.json" if a.tiles == "auto" else a.tiles)
     def tile_for(cid: str) -> str:
         if tilemap is not None:
             return tilemap.tile_of(cid)
         return cid if spec else a.tile
     cams = {cid: Cam(camera_id=cid, tile_id=tile_for(cid)) for cid in ids}
-    tile_linkers: dict[str, TubeLinker] = {}
+    site_linker = TubeLinker("site", relation=tilemap.relation) if (tilemap is not None and embedder) else None
     if tilemap is not None:
-        print(f"[ingest] tiles: {tilemap.tiles}", flush=True)
+        print(f"[ingest] BuF {tilemap.kind}: tiles {tilemap.tiles}" + (f" adjacency {list(tilemap.adjacency)}" if tilemap.adjacency else ""), flush=True)
     tick_ms = int(1000 / a.fps)
     frames = 0; t_wall0 = time.time(); pts0 = None
     stats: Counter = Counter()
@@ -163,10 +170,7 @@ def main() -> None:
         cam.gate = FrameDiffGate(cam.camera_id)
         cam.tracker = TRACKERS["byte"](cam.camera_id, exit_boxes=exits, keyframe_sink=kf.make_sink(lambda c=cam: c.current["frame"]))
         cam.compiler = EventCompiler(cam.camera_id, cam.zones, enter_ticks=1, exit_ticks=2, dwell_ms=5000, tile_id=cam.tile_id)
-        if embedder:
-            cam.linker = tile_linkers.setdefault(cam.tile_id, TubeLinker(cam.tile_id)) if tilemap is not None else TubeLinker(cam.camera_id)
-        else:
-            cam.linker = None
+        cam.linker = (site_linker if site_linker is not None else TubeLinker(cam.camera_id)) if embedder else None
 
     def close_episode(cam: Cam, t_end_ms: int, status: EpisodeStatus) -> None:
         if cam.ep is None:

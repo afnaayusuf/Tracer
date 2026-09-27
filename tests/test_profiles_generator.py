@@ -271,8 +271,50 @@ def test_tile_discovery_then_tile_identity_end_to_end(tmp_path):
     out = subprocess.run([*(base[:base.index('--db') + 1]), db2, *base[base.index('--db') + 2:], "--out", str(tmp_path / "ep2"),
                           "--tiles", str(tmp_path / "tiles.json")], capture_output=True, text=True, env={**os.environ, "PYTHONPATH": os.getcwd()})
     assert out.returncode == 0, out.stderr[-1500:]
-    assert "tiles: {'T1': ['cam01', 'cam02', 'cam03', 'cam04']}" in out.stdout
+    assert "BuF homo: tiles {'T1': ['cam01', 'cam02', 'cam03', 'cam04']}" in out.stdout
     e2 = connect(db2); b = footage_bounds(e2)
     rows = coverage_window(e2, b[0], b[1])
-    assert len(rows) == 2 and {r["entity_id"] for r in rows} == {"T1:E1", "T1:E2"}      # two people, each ONE id across four cameras
+    assert len(rows) == 2 and {r["entity_id"] for r in rows} == {"site:E1", "site:E2"}  # two people, each ONE id across four cameras
     assert all(sorted(r["cameras"]) == ["cam01", "cam02", "cam03", "cam04"] for r in rows)
+
+
+def test_homo_buf_gives_one_identity_from_the_start_and_adjacency_is_learned(tmp_path):
+    import av
+    import numpy as np
+    from vi.agent import footage_bounds
+    from vi.agent.tools import coverage_window
+    from vi.fusion import TileMap, discover_tiles
+    from vi.store import connect
+    rng = np.random.default_rng(7)
+    path = tmp_path / "shop.mp4"; c = av.open(str(path), "w"); s = c.add_stream("mpeg4", rate=5); s.width, s.height, s.pix_fmt = 640, 480, "yuv420p"
+    for i in range(5 * 24):
+        t = i / 5
+        f = rng.normal(100, 3, (480, 640)).clip(0, 255).astype(np.uint8)
+        f[:, 318:322] = 0; f[238:242, :] = 0
+        if 3 <= t < 21:
+            x = 10 + int(((t - 3) / 18) * 250)
+            for (cx, cy) in [(0, 0), (320, 0), (0, 240), (320, 240)]:
+                f[cy + 60: cy + 180, cx + x: cx + x + 24] = 235
+        for pk in s.encode(av.VideoFrame.from_ndarray(np.repeat(f[:, :, None], 3, axis=2), format="rgb24")): c.mux(pk)
+    for pk in s.encode(): c.mux(pk)
+    c.close()
+    db = f"sqlite+pysqlite:///{tmp_path / 'vi.db'}"
+    out = subprocess.run([sys.executable, "bench/run_ingest.py", "--source", str(path), "--grid", "auto", "--db", db, "--model", "fake", "--reid", "hist",
+                          "--writer", "none", "--tiles", "one", "--start-time", "2026-09-27T10:00:00+00:00", "--fps", "5", "--threshold", "0.3",
+                          "--out", str(tmp_path / "ep"), "--live-dir", str(tmp_path / "live")], capture_output=True, text=True,
+                         env={**os.environ, "PYTHONPATH": os.getcwd()})
+    assert out.returncode == 0, out.stderr[-1500:]
+    assert "BuF homo: tiles {'T1': ['cam01', 'cam02', 'cam03', 'cam04']}" in out.stdout
+    engine = connect(db); b = footage_bounds(engine)
+    rows = coverage_window(engine, b[0], b[1])
+    assert len(rows) == 1 and rows[0]["entity_id"] == "site:E1" and sorted(rows[0]["cameras"]) == ["cam01", "cam02", "cam03", "cam04"]
+    # adjacency from sequential sightings (synthetic entities): T1 -> T2 twice, ~10 s apart
+    def u(seed):
+        v = np.random.default_rng(seed).normal(size=48).astype(np.float32); return (v / np.linalg.norm(v)).tolist()
+    ents = []
+    for k, seed in enumerate((1, 2)):
+        ents += [{"entity_id": f"cam01:E{k}", "camera_id": "cam01", "first_seen_ms": k * 60000, "last_seen_ms": k * 60000 + 8000, "embedding": u(seed)},
+                 {"entity_id": f"cam05:E{k}", "camera_id": "cam05", "first_seen_ms": k * 60000 + 18000, "last_seen_ms": k * 60000 + 26000, "embedding": u(seed)}]
+    tm = discover_tiles(ents, cameras=["cam01", "cam05"])
+    assert tm.tiles == {"T1": ["cam01"], "T2": ["cam05"]} and tm.kind == "hetero"
+    assert "T1|T2" in tm.adjacency and tm.adjacency["T1|T2"]["handoffs"] == 2 and tm.relation("cam01", "cam05")[0] == "adjacent"

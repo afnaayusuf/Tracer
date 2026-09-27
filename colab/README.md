@@ -113,3 +113,13 @@ requests.post("http://127.0.0.1:8000/ingest/stop"); requests.post("http://127.0.
 ```
 The restarted ingest runs one linker per tile: a person seen by four cameras of a tile has one id (`T1:E3`) from the
 moment they are seen twice. Until a map exists, identities are per camera and answers join them as W-ids.
+
+## BuF types
+
+* **homo**: every cell shows the same space. `"tiles": "one"` in `/ingest/start` — one identity from the first
+  frame; a new track on any camera while the person is live on another is that person (unambiguous case relaxes
+  the appearance bar, which is what a top-down view needs).
+* **hetero**: cells are chained locations with hand-offs. `"tiles": "auto"` (default): identities are per camera
+  until the engine has seen ~5 minutes, then it learns tiles (simultaneous matches) and adjacency (sequential
+  matches with travel times), saves the map and restarts itself from where it was. Hand-offs link a person who
+  left tile A and appears on adjacent tile B within the learned travel time; non-adjacent tiles never link.
