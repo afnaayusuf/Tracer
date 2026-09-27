@@ -172,3 +172,21 @@ def test_dying_duplicate_merges_into_the_live_lookalike_but_long_coexistence_doe
         p1.last_seen = CamTime(cam_utc_ms=t); p1.state = TubeState.active; lk2.on_state(p1, t)
     p2.state = TubeState.lost; p2.last_seen = CamTime(cam_utc_ms=8000)
     assert lk2.on_close(p2, 8000) is None and lk2.entities == 2
+
+
+@pytest.mark.edge("E-TUBE-04")
+def test_tile_linker_joins_the_same_person_across_cameras_but_not_two_people_on_one_camera():
+    from vi.schemas import Box, CamTime, Tube
+    def tb(tid, cam, x, t=0):
+        return Tube(tube_id=tid, camera_id=cam, class_label="person", born=CamTime(cam_utc_ms=t), last_seen=CamTime(cam_utc_ms=t),
+                    box=Box(x1=x, y1=100, x2=x + 40, y2=220))
+    a = unit(1)
+    lk = TubeLinker("T1", cross_camera_sim_thr=0.85)
+    t_a = tb("cam01:0:1", "cam01", 300); assert lk.on_birth(t_a, a, 0) is None and lk.entities == 1
+    t_a.state = TubeState.active; lk.on_state(t_a, 500)
+    t_b = tb("cam02:500:1", "cam02", 900, t=500)                         # the same man from the second camera, at the same time
+    ev = lk.on_birth(t_b, a, 500)
+    assert ev is not None and ev.payload["cross_camera"] and lk.entities == 1
+    assert lk.entity_of("cam02:500:1") == lk.entity_of("cam01:0:1") == "T1:E1" and lk.absorbed == []
+    t_c = tb("cam01:600:2", "cam01", 700, t=600)                         # a look-alike on cam01 while E1 is live on cam01: a second person
+    assert lk.on_birth(t_c, a, 600) is None and lk.entities == 2

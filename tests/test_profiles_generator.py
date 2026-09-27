@@ -193,3 +193,86 @@ def test_grid_ingest_makes_a_camera_per_cell_and_camera_questions_ground(tmp_pat
     assert r["camera_id"] == "cam04"
     assert ask_window(engine, "What happened on camera 9?", FakeBackend(), b[1])["grounding"] == "unknown_camera"
     assert (tmp_path / "live" / "latest.jpg").exists()
+
+
+def test_grid_autodetect_and_cross_camera_fusion(tmp_path):
+    """A 2x2 NVR view of ONE walker seen by all four cells at once: auto grid, and the count is 1 person / 4 tracks."""
+    import av
+    import numpy as np
+    from vi.agent import ask_window, FakeBackend, footage_bounds
+    from vi.agent.tools import count_entities_window, window_script
+    from vi.store import connect
+    rng = np.random.default_rng(3)
+    path = tmp_path / "shop.mp4"; c = av.open(str(path), "w"); s = c.add_stream("mpeg4", rate=5); s.width, s.height, s.pix_fmt = 640, 480, "yuv420p"
+    for i in range(5 * 24):
+        t = i / 5
+        f = rng.normal(100, 3, (480, 640)).clip(0, 255).astype(np.uint8)
+        f[:, 318:322] = 0; f[238:242, :] = 0                          # NVR seams
+        if 3 <= t < 21:
+            x = 10 + int(((t - 3) / 18) * 250)
+            for (cx, cy) in [(0, 0), (320, 0), (0, 240), (320, 240)]:  # the same bright figure in every cell = same person, 4 angles
+                f[cy + 60: cy + 180, cx + x: cx + x + 24] = 235
+        for pk in s.encode(av.VideoFrame.from_ndarray(np.repeat(f[:, :, None], 3, axis=2), format="rgb24")): c.mux(pk)
+    for pk in s.encode(): c.mux(pk)
+    c.close()
+    db = f"sqlite+pysqlite:///{tmp_path / 'vi.db'}"
+    out = subprocess.run([sys.executable, "bench/run_ingest.py", "--source", str(path), "--grid", "auto", "--db", db, "--model", "fake", "--reid", "hist",
+                          "--writer", "none", "--start-time", "2026-09-27T10:00:00+00:00", "--fps", "5", "--threshold", "0.3",
+                          "--out", str(tmp_path / "ep"), "--live-dir", str(tmp_path / "live")], capture_output=True, text=True,
+                         env={**os.environ, "PYTHONPATH": os.getcwd()})
+    assert out.returncode == 0, out.stderr[-1500:]
+    assert "grid auto -> 2x2" in out.stdout
+    engine = connect(db)
+    b = footage_bounds(engine)
+    r = count_entities_window(engine, b[0], b[1])
+    assert r["camera_entities"] == 4 and r["people"] == 1 and len(r["world_groups"]) == 1        # one man, four cameras
+    script = window_script(engine, b[0], b[1])
+    assert "CAST: 1 people (4 camera tracks" in script and "W1: " in script
+    res = ask_window(engine, "How many people were there?", FakeBackend(), b[1])
+    assert res["final"]["action"] == "answer"
+
+
+def test_tile_discovery_then_tile_identity_end_to_end(tmp_path):
+    """Phase 1 (per camera) records one man on four cameras; discovery groups the cameras; phase 2
+    with the tile map gives him ONE id at ingest time."""
+    import av
+    import numpy as np
+    from vi.agent import footage_bounds
+    from vi.agent.tools import cameras_in_store, coverage_window
+    from vi.fusion import discover_tiles
+    from vi.fusion.tiles import entities_for_affinity
+    from vi.store import connect
+    rng = np.random.default_rng(5)
+    path = tmp_path / "shop.mp4"; c = av.open(str(path), "w"); s = c.add_stream("mpeg4", rate=5); s.width, s.height, s.pix_fmt = 640, 480, "yuv420p"
+    for i in range(5 * 24):
+        t = i / 5
+        f = rng.normal(100, 3, (480, 640)).clip(0, 255).astype(np.uint8)
+        f[:, 318:322] = 0; f[238:242, :] = 0
+        # two different-looking people, one after the other, each seen by all four cells at once
+        for (t0, t1, val) in [(3, 10, 250), (13, 21, 205)]:      # both above the fake detector luma (200), different histogram bins
+            if t0 <= t < t1:
+                x = 10 + int(((t - t0) / (t1 - t0)) * 250)
+                for (cx, cy) in [(0, 0), (320, 0), (0, 240), (320, 240)]:
+                    f[cy + 60: cy + 180, cx + x: cx + x + 24] = val
+        for pk in s.encode(av.VideoFrame.from_ndarray(np.repeat(f[:, :, None], 3, axis=2), format="rgb24")): c.mux(pk)
+    for pk in s.encode(): c.mux(pk)
+    c.close()
+    db = f"sqlite+pysqlite:///{tmp_path / 'vi.db'}"
+    base = [sys.executable, "bench/run_ingest.py", "--source", str(path), "--grid", "2x2", "--db", db, "--model", "fake", "--reid", "hist",
+            "--writer", "none", "--start-time", "2026-09-27T10:00:00+00:00", "--fps", "5", "--threshold", "0.3",
+            "--live-dir", str(tmp_path / "live")]
+    out = subprocess.run(base + ["--out", str(tmp_path / "ep1"), "--tiles", "none"], capture_output=True, text=True, env={**os.environ, "PYTHONPATH": os.getcwd()})
+    assert out.returncode == 0, out.stderr[-1500:]
+    engine = connect(db)
+    tm = discover_tiles(entities_for_affinity(engine), cameras=cameras_in_store(engine))
+    assert list(tm.tiles.values()) == [["cam01", "cam02", "cam03", "cam04"]]            # all four see the same area
+    tm.save(tmp_path / "tiles.json")
+    db2 = f"sqlite+pysqlite:///{tmp_path / 'vi2.db'}"
+    out = subprocess.run([*(base[:base.index('--db') + 1]), db2, *base[base.index('--db') + 2:], "--out", str(tmp_path / "ep2"),
+                          "--tiles", str(tmp_path / "tiles.json")], capture_output=True, text=True, env={**os.environ, "PYTHONPATH": os.getcwd()})
+    assert out.returncode == 0, out.stderr[-1500:]
+    assert "tiles: {'T1': ['cam01', 'cam02', 'cam03', 'cam04']}" in out.stdout
+    e2 = connect(db2); b = footage_bounds(e2)
+    rows = coverage_window(e2, b[0], b[1])
+    assert len(rows) == 2 and {r["entity_id"] for r in rows} == {"T1:E1", "T1:E2"}      # two people, each ONE id across four cameras
+    assert all(sorted(r["cameras"]) == ["cam01", "cam02", "cam03", "cam04"] for r in rows)

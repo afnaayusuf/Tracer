@@ -375,8 +375,9 @@ body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:var(
   /* ---------- Tracer backend ---------- */
   var API = (window.TRACER_API || '').replace(/\/$/, '');   /* same origin by default; set window.TRACER_API to point elsewhere */
   var mode = 'cameras';
+  var history = [];                                            /* last exchanges, so "yes exactly" means something */
   function answer(q){
-    return fetch(API + '/ask', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ question:q, mode:mode }) })
+    return fetch(API + '/ask', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ question:q, mode:mode, history: history.slice(-3) }) })
       .then(function(r){ if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .catch(function(e){ return { text: 'I could not reach the engine (' + e.message + '). Is the backend running?', mood: 'botUnsure', evidence: [] }; });
   }
@@ -438,6 +439,7 @@ body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:var(
       scrollEnd();
 
       answer(q).then(function(reply){
+        history.push({ q: q, a: reply.text || '', action: reply.action || 'answer' });
         if(reply.mood === 'botUnsure') b.parentNode.querySelector('.row-avatar img').src = AV.botUnsure;
         stream(b, reply.text, function(){ metaLine(b, reply); evidenceStrip(b, reply.evidence); scrollEnd(); busy = false; });
       });

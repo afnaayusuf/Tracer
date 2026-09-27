@@ -42,3 +42,21 @@ def test_api_serves_page_health_ask_and_evidence(store_with_footage):
     assert c.get("/live/latest.jpg").status_code == 200
     assert c.get("/keyframes/../../etc/passwd").status_code in (404, 400)
     assert c.get("/ingest/status").json()["running"] is False
+
+
+def test_followups_and_deadline(store_with_footage):
+    from fastapi.testclient import TestClient
+    from vi.agent.loop import resolve_followup
+    from vi.api import create_app
+    db, tmp = store_with_footage
+    q, ctx = resolve_followup("yes exactly", [{"q": "what happened a minute ago?", "a": "Do you mean 10:00:05?", "action": "clarify"}])
+    assert q.startswith("what happened a minute ago?") and "confirmed" in q and "User: yes exactly" in ctx
+    q2, ctx2 = resolve_followup("and before that?", [{"q": "who came in?", "a": "cam1:E1 at 10:00:02.", "action": "answer"}])
+    assert q2 == "and before that?" and "Previous answer: cam1:E1" in ctx2
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", keyframes_dir=str(tmp / "keyframes"),
+                     live_dir=str(tmp / "live"), load_backend=False)
+    c = TestClient(app)
+    r = c.post("/ask", json={"question": "what just happened a minute ago?"}).json()
+    assert r["grounding"] == "ok" and r["window"] and r["action"] in ("answer", "clarify")
+    r = c.post("/ask", json={"question": "yes exactly", "history": [{"q": "who was there just now?", "a": "Which person?", "action": "clarify"}]}).json()
+    assert r["action"] in ("answer", "clarify") and r["grounding"] != "off_topic"

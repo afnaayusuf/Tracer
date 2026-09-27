@@ -280,7 +280,8 @@ def coverage_window(engine: Engine, t_start_ms: int, t_end_ms: int, class_label:
                 cur[1] = max(cur[1], b)
         if cur: covered += cur[1] - cur[0]
         attrs = next((r["attributes"] for r in rs if r.get("attributes")), None)
-        out.append({"entity_id": eid, "first_seen_ms": max(t_start_ms, min(r["born_ms"] for r in rs)),
+        emb = next((r["embedding"] for r in rs if r.get("embedding")), None)
+        out.append({"entity_id": eid, "embedding": emb, "first_seen_ms": max(t_start_ms, min(r["born_ms"] for r in rs)),
                     "last_seen_ms": min(t_end_ms, max(r["last_seen_ms"] for r in rs)), "coverage": round(covered / span, 3),
                     "tubes": len(rs), "quality": "ok" if ok else "low", "cameras": sorted({r["camera_id"] for r in rs}),
                     "looks": (attrs or {}).get("description") if attrs else None,
@@ -288,9 +289,49 @@ def coverage_window(engine: Engine, t_start_ms: int, t_end_ms: int, class_label:
     return sorted(out, key=lambda x: (-x["coverage"], x["first_seen_ms"]))
 
 
+def world_groups(rows: list[dict], sim_thr: float = 0.85, max_gap_ms: int = 60_000) -> dict[str, str]:
+    """Cross-camera fusion at query time (R14): entities on DIFFERENT cameras whose appearance
+    embeddings agree and whose times overlap (or nearly) are one world person. Never joins two
+    entities of the same camera: that camera's linker already decided they are different people.
+    Returns entity_id -> world id (W1, W2, ...), ordered by first appearance."""
+    import numpy as np
+    ids = [r["entity_id"] for r in rows]
+    parent = {i: i for i in ids}
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    embs = {r["entity_id"]: (np.asarray(r["embedding"], np.float32) if r.get("embedding") else None) for r in rows}
+    for i, a in enumerate(rows):
+        for b in rows[i + 1:]:
+            if set(a.get("cameras", [])) & set(b.get("cameras", [])):
+                continue                                             # same camera: already distinct
+            ea, eb = embs[a["entity_id"]], embs[b["entity_id"]]
+            if ea is None or eb is None or ea.shape != eb.shape:
+                continue
+            gap = max(a["first_seen_ms"], b["first_seen_ms"]) - min(a["last_seen_ms"], b["last_seen_ms"])
+            if gap > max_gap_ms:
+                continue
+            sim = float(ea @ eb) / (float(np.linalg.norm(ea)) * float(np.linalg.norm(eb)) + 1e-8)
+            if sim >= sim_thr:
+                parent[find(a["entity_id"])] = find(b["entity_id"])
+    order: dict[str, str] = {}
+    for r in sorted(rows, key=lambda x: x["first_seen_ms"]):
+        root = find(r["entity_id"])
+        if root not in order:
+            order[root] = f"W{len(order) + 1}"
+    return {r["entity_id"]: order[find(r["entity_id"])] for r in rows}
+
+
 def count_entities_window(engine: Engine, t_start_ms: int, t_end_ms: int, class_label: str = "person", camera_id: str | None = None) -> dict:
     rows = coverage_window(engine, t_start_ms, t_end_ms, class_label, camera_id=camera_id)
-    return {"count": len(rows), "entity_ids": [r["entity_id"] for r in rows], "window_ms": [t_start_ms, t_end_ms], "camera_id": camera_id}
+    worlds = world_groups(rows)
+    groups: dict[str, list[str]] = {}
+    for eid, w in worlds.items():
+        groups.setdefault(w, []).append(eid)
+    return {"count": len(groups), "people": len(groups), "camera_entities": len(rows),
+            "world_groups": groups, "entity_ids": [r["entity_id"] for r in rows], "window_ms": [t_start_ms, t_end_ms], "camera_id": camera_id,
+            "note": "count = people after joining the same person across cameras; camera_entities = per-camera tracks"}
 
 
 def entities_present_window(engine: Engine, t_start_ms: int, t_end_ms: int, min_coverage: float = 0.9, class_label: str = "person",
@@ -314,14 +355,20 @@ def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str =
         eps = [e for e in eps if camera_id in (e["camera_ids"] or [])]
     all_cams = cameras_in_store(engine)
     cast = coverage_window(engine, t_start_ms, t_end_ms, camera_id=camera_id)
+    worlds = world_groups(cast)
+    n_people = len(set(worlds.values()))
     lines = [f"WINDOW {clock(t_start_ms)}–{clock(t_end_ms)} ({(t_end_ms - t_start_ms) / 60000:.1f} min) | episodes {len(eps)} | "
              + (f"camera {camera_id}" if camera_id else f"cameras {','.join(all_cams)}"),
-             f"CAST: {len(cast)} confirmed people in this window" + ("" if camera_id or len(all_cams) <= 1 else
-             " (entities are per camera; the same person on two cameras appears twice)")]
+             f"CAST: {n_people} people" + (f" ({len(cast)} camera tracks; W-ids join the same person seen on several cameras)" if len(all_cams) > 1 else "")]
+    by_world: dict[str, list[dict]] = {}
     for c in cast:
-        lines.append(f"  {c['entity_id']}" + (f"  on {','.join(c['cameras'])}" if len(all_cams) > 1 else "")
-                     + f"  seen {clock(c['first_seen_ms'])}–{clock(c['last_seen_ms'])}  coverage {c['coverage']:.0%}"
-                     + (f"  looks: {c['looks']}" if c.get("looks") else "") + (f"  keyframe {c['keyframe']}" if c.get("keyframe") else ""))
+        by_world.setdefault(worlds[c["entity_id"]], []).append(c)
+    for w, members in by_world.items():
+        if len(all_cams) > 1:
+            lines.append(f"  {w}: " + " + ".join(f"{m['entity_id']} on {','.join(m['cameras'])}" for m in members))
+        for c in members:
+            lines.append(f"    {c['entity_id']}  seen {clock(c['first_seen_ms'])}–{clock(c['last_seen_ms'])}  coverage {c['coverage']:.0%}"
+                         + (f"  looks: {c['looks']}" if c.get("looks") else "") + (f"  keyframe {c['keyframe']}" if c.get("keyframe") else ""))
     ev_conds = [events.c.t_ms >= t_start_ms, events.c.t_ms <= t_end_ms]
     if camera_id:
         ev_conds.append(events.c.camera_id == camera_id)

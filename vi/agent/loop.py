@@ -76,7 +76,7 @@ Keep answers under 60 words and cite at most 8 ids; cite entity ids (cam1:E7), n
 that appear in the script or tool results.
 EVENT_TYPES: """ + ", ".join(EVENT_TYPES) + "\nTools: " + json.dumps(TOOL_SPECS)
 
-ID_RE = re.compile(r"\b(ev_[0-9a-f]{16}|[A-Za-z0-9_]+:E\d+|anon:[A-Za-z0-9_:]+|[A-Za-z0-9_]+:\d+:\d+)\b")
+ID_RE = re.compile(r"\b(ev_[0-9a-f]{16}|[A-Za-z0-9_]+:E\d+|anon:[A-Za-z0-9_:]+|[A-Za-z0-9_]+:\d+:\d+|W\d{1,3})\b")
 
 
 class FakeBackend:
@@ -467,7 +467,8 @@ WINDOW_TOOLS = {"count_entities", "entities_present", "coverage"}
 SYSTEM_LIVE_SUFFIX = """
 You are answering about recorded footage. FOOTAGE: {start}–{end} ({tz}); the latest processed moment is {now}.
 The scene script below covers only the window {ws}–{we}. If the question needs a different time, say which
-window you are answering about. If nothing in the window matches, say so plainly. Never guess names: people are
+window you are answering about. W-ids (W1, W2…) are people; a person seen on several cameras has one W-id and several
+camera tracks (cam03:E1 …). Count people by W-ids, never by camera tracks. If nothing in the window matches, say so plainly. Never guess names: people are
 unnamed unless the cast says otherwise; describe them from their `looks` instead. Counts carry an uncertainty of
 about ±1 person; say "about" for counts above 3. Do not speculate about what happened outside the footage.
 """
@@ -502,10 +503,29 @@ def _window_tool(engine: Engine, step: ToolStep, ws: int, we: int, camera_id: st
     return run_tool(engine, step, None)
 
 
-def ask_window(engine: Engine, question: str, backend, now_ms: int, tz_name: str = "UTC", max_steps: int = 6) -> dict:
+AFFIRM_RE = re.compile(r"^\s*(?:(?:yes|yeah|yep|yup|exactly|correct|right|that one|that's right|ok|okay|sure|go ahead|please|do it|the first|the second|the latter|the former)[\s,!.]*)+$", re.I)
+
+
+def resolve_followup(question: str, history: list[dict] | None) -> tuple[str, str | None]:
+    """history: [{"q": ..., "a": ..., "action": "answer"|"clarify"}, ...] (most recent last).
+    A bare confirmation after a clarification re-asks the previous question with the assistant's
+    proposed reading; any other question carries the previous exchange as context."""
+    if not history:
+        return question, None
+    last = history[-1]
+    if AFFIRM_RE.match(question) and last.get("action") == "clarify":
+        merged = f"{last['q']} (the user confirmed: {last['a']})"
+        return merged, f"Previous question: {last['q']}\nYou asked: {last['a']}\nUser: {question}"
+    ctx = f"Previous question: {last['q']}\nPrevious answer: {last['a'][:300]}"
+    return question, ctx
+
+
+def ask_window(engine: Engine, question: str, backend, now_ms: int, tz_name: str = "UTC", max_steps: int = 6,
+               history: list[dict] | None = None) -> dict:
     """Live-footage question answering: scope check -> time grounding -> window script -> model loop
     with window-aware numeric tools. Refusals and clarifications happen before any model call."""
     t_start_total = time.perf_counter()
+    question, context = resolve_followup(question, history)
     bounds = T.footage_bounds(engine)
     if bounds is None:
         return {"question": question, "final": {"action": "answer", "text": "No footage has been processed yet.", "citations": [], "cited": False},
@@ -540,7 +560,7 @@ def ask_window(engine: Engine, question: str, backend, now_ms: int, tz_name: str
     system = SYSTEM + SYSTEM_LIVE_SUFFIX.format(start=fmt(start_ms, tz), end=fmt(end_ms, tz), tz=tz_name,
                                                  now=fmt(now_ms or end_ms, tz), ws=fmt(ws, tz), we=fmt(we, tz))
     messages = [{"role": "system", "content": system},
-                {"role": "user", "content": f"SCENE SCRIPT:\n{script}\n\nQuestion: {question}"}]
+                {"role": "user", "content": f"SCENE SCRIPT:\n{script}\n\n" + (f"CONTEXT:\n{context}\n\n" if context else "") + f"Question: {question}"}]
     trace: list[dict] = []
     final: dict | None = None
     model_ms = tool_ms = 0.0

@@ -52,7 +52,8 @@ def load_episode_file(engine: Engine, path: str | Path) -> dict:
                                   state=t.state.value, born_ms=t.born.corrected_ms(), last_seen_ms=t.last_seen.corrected_ms(),
                                   box=t.box.model_dump(), zone_ids=t.zone_ids, modality=t.modality.value,
                                   keyframe_refs=t.keyframe_refs, attributes=t.attributes.model_dump(mode="json") if t.attributes else None,
-                                  merge_candidates=t.merge_candidates, quality=t.quality, quality_reason=t.quality_reason))
+                                  merge_candidates=t.merge_candidates, quality=t.quality, quality_reason=t.quality_reason,
+                                  embedding=t.embedding))
         elif isinstance(rec, EpisodeClose):
             close = rec
     if header is None:
@@ -70,6 +71,8 @@ def load_episode_file(engine: Engine, path: str | Path) -> dict:
         e["last_seen_ms"] = max(e["last_seen_ms"], r["last_seen_ms"])
         if e["best_keyframe_ref"] is None and r["keyframe_refs"]:
             e["best_keyframe_ref"] = r["keyframe_refs"][0]
+        if e.get("embedding") is None and r.get("embedding"):
+            e["embedding"] = r["embedding"]
     with engine.begin() as conn:
         counts["episodes"] += insert_ignore(conn, episodes, [dict(
             episode_id=header.episode_id, tile_id=header.tile_id, camera_ids=header.camera_ids,
@@ -83,6 +86,13 @@ def load_episode_file(engine: Engine, path: str | Path) -> dict:
         counts["events"] += insert_ignore(conn, events, event_rows)
         counts["patches"] += insert_ignore(conn, patches, patch_rows)
         counts["tubes"] += insert_ignore(conn, tubes, tube_rows)
+        for r in tube_rows:                    # a tube that continued past a soft cut: extend its record from the later episode
+            cur = conn.execute(select(tubes.c.last_seen_ms, tubes.c.entity_id).where(tubes.c.tube_id == r["tube_id"])).first()
+            if cur is not None and r["last_seen_ms"] > (cur[0] or 0):
+                conn.execute(update(tubes).where(tubes.c.tube_id == r["tube_id"]).values(
+                    last_seen_ms=r["last_seen_ms"], state=r["state"], box=r["box"], keyframe_refs=r["keyframe_refs"],
+                    attributes=r["attributes"], quality=r["quality"], quality_reason=r["quality_reason"],
+                    embedding=r["embedding"] or None, entity_id=r["entity_id"] if not r["entity_id"].startswith("anon:") else cur[1]))
         counts["entities"] += insert_ignore(conn, entities, list(ent_rows.values()))
         for e in ent_rows.values():        # an entity that already exists (earlier episode) grows its span and tube list
             cur = conn.execute(select(entities).where(entities.c.entity_id == e["entity_id"])).first()

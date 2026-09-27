@@ -96,3 +96,20 @@ curl -s -X POST http://127.0.0.1:8000/ingest/start -H 'Content-Type: application
 Use `"model":"medium"` for grids: a 4x4 cell of a 1080p export is 480x270 and people are 30-60 px tall; medium's
 576-px input costs the same as nano on the L4 and sees them better. Watch `realtime_factor` in the ingest log:
 above 1.0 the sixteen cameras keep up with the clock.
+
+Grid layout is detected from the seams between cells (`"grid": "auto"`, the default); force it only if the
+detection line in `data/live/ingest.log` is wrong. One person seen by several cameras is one W-id in answers
+and counts (cross-camera fusion by appearance + time); per-camera tracks stay auditable underneath.
+
+## Tiles: cameras that see the same area
+
+Identity is per tile, not per camera. The map is learned from the footage: two cameras that keep producing the
+same-looking person at the same time share a tile; cameras that see the same person only in sequence are adjacent.
+
+```
+# after 10-20 minutes of footage:
+requests.post("http://127.0.0.1:8000/tiles/recompute").json()      # -> {"tiles": {"T1": ["cam01","cam02",...]}, ...}
+requests.post("http://127.0.0.1:8000/ingest/stop"); requests.post("http://127.0.0.1:8000/ingest/start", json={...})
+```
+The restarted ingest runs one linker per tile: a person seen by four cameras of a tile has one id (`T1:E3`) from the
+moment they are seen twice. Until a map exists, identities are per camera and answers join them as W-ids.

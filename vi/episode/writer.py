@@ -89,12 +89,14 @@ class EpisodeWriter:
 
 
 def should_soft_cut(cast_prev: set[str], cast_now: set[str], duration_ms: int,
-                    max_duration_ms: int = 30 * 60_000, churn_thr: float = 0.6) -> bool:
+                    max_duration_ms: int = 30 * 60_000, churn_thr: float = 0.6, min_duration_ms: int = 120_000) -> bool:
     """E-EVT-07: a busy tile never goes quiet, so an episode is cut when the cast has
-    mostly turned over or the episode exceeds max duration."""
+    mostly turned over or the episode exceeds max duration. Churn cuts need a minimum length:
+    on a busy camera the cast turns over every few seconds, and 800 two-second episodes an hour
+    are not episodes (session 31's 16-camera run)."""
     if duration_ms >= max_duration_ms:
         return True
-    if not cast_prev:
+    if not cast_prev or duration_ms < min_duration_ms:
         return False
     churn = 1.0 - len(cast_prev & cast_now) / len(cast_prev | cast_now)
     return churn >= churn_thr

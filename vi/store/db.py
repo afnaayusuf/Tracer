@@ -31,7 +31,7 @@ tubes = Table(
     Column("born_ms", BigInteger, index=True), Column("last_seen_ms", BigInteger), Column("box", JSON),
     Column("zone_ids", JSON), Column("modality", String), Column("keyframe_refs", JSON),
     Column("attributes", JSON), Column("merge_candidates", JSON),
-    Column("quality", String), Column("quality_reason", String),
+    Column("quality", String), Column("quality_reason", String), Column("embedding", JSON),
 )
 entities = Table(
     "entities", metadata,

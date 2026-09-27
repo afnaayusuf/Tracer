@@ -18,8 +18,19 @@ class Grounding:
     matched: str = ""
 
 
-REL = re.compile(r"\b(last|past|previous)\s+(\d+)\s*(min|mins|minute|minutes|hour|hours|hr|hrs|sec|seconds)\b", re.I)
-AGO = re.compile(r"\b(\d+)\s*(min|mins|minute|minutes|hour|hours|hr|hrs)\s+ago\b", re.I)
+NUMW = r"(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|couple of|few|half an?)"
+REL = re.compile(r"\b(last|past|previous)\s+" + NUMW + r"?\s*(min|mins|minute|minutes|hour|hours|hr|hrs|sec|seconds)\b", re.I)
+AGO = re.compile(r"\b" + NUMW + r"\s*(min|mins|minute|minutes|hour|hours|hr|hrs)\s+ago\b", re.I)
+JUST_NOW = re.compile(r"\b(just now|right now|a moment ago|moments ago|just happened|currently|at the moment)\b", re.I)
+WORDS_N = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+           "fifteen": 15, "twenty": 20, "thirty": 30, "couple of": 2, "few": 3, "half an": 0.5, "half a": 0.5}
+
+
+def _n(tok: str | None) -> float:
+    if not tok:
+        return 1
+    t = tok.strip().lower()
+    return float(t) if t.isdigit() else WORDS_N.get(t, 1)
 CLOCK = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b", re.I)
 BETWEEN = re.compile(r"\bbetween\s+(.+?)\s+and\s+(.+?)(?:[,.?]|$)", re.I)
 AFTER = re.compile(r"\b(after|since|from)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b", re.I)
@@ -52,15 +63,18 @@ def ground(question: str, now_ms: int, start_ms: int, end_ms: int, tz_name: str 
     ref = datetime.fromtimestamp(now_ms / 1000, tz)
     if TOMORROW.search(q):
         return Grounding("future", message=f"That is after the latest footage I have, which ends at {fmt(end_ms, tz)}.", matched=TOMORROW.search(q).group(0))
+    m = JUST_NOW.search(q)
+    if m:
+        return Grounding("ok", max(start_ms, now_ms - 120_000), now_ms, matched=m.group(0))
     m = REL.search(q)
     if m:
-        n, unit = int(m.group(2)), m.group(3).lower()
-        span = n * (3600 if unit.startswith("h") else 1 if unit.startswith("s") else 60) * 1000
+        n, unit = _n(m.group(2)), m.group(3).lower()
+        span = int(n * (3600 if unit.startswith("h") else 1 if unit.startswith("s") else 60) * 1000)
         return Grounding("ok", max(start_ms, now_ms - span), now_ms, matched=m.group(0))
     m = AGO.search(q)
     if m:
-        n, unit = int(m.group(1)), m.group(2).lower()
-        span = n * (3600 if unit.startswith("h") else 60) * 1000
+        n, unit = _n(m.group(1)), m.group(2).lower()
+        span = int(n * (3600 if unit.startswith("h") else 60) * 1000)
         t = now_ms - span
         if t < start_ms:
             return Grounding("before_start", message=f"That is before the footage starts at {fmt(start_ms, tz)}.", matched=m.group(0))

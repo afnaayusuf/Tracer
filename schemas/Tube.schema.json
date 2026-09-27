@@ -395,6 +395,21 @@
       "title": "Max Height Px",
       "type": "number"
     },
+    "embedding": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Embedding"
+    },
     "quality": {
       "default": "ok",
       "enum": [

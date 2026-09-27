@@ -23,7 +23,7 @@ from vi.detect import dedupe_detections, full_frame_roi, remap_detections
 from vi.episode import EpisodeWriter, KeyframeStore, annotate, should_soft_cut
 from vi.events import EventCompiler, default_zones, load_zones
 from vi.gate import FrameDiffGate
-from vi.ingest import GridSpec, cell_ids, compose, label_zone, split
+from vi.ingest import GridSpec, cell_ids, compose, label_zones, split
 from vi.ingest import VideoReader
 from vi.profiles import load_profile
 from vi.reid import HistogramEmbedder, crop_for_embedding, make_embedder
@@ -71,7 +71,7 @@ def main() -> None:
     ap.add_argument("--source", required=True, help="file path or rtsp:// url")
     ap.add_argument("--db", default="sqlite+pysqlite:///data/vi.db")
     ap.add_argument("--camera", default="cam1"); ap.add_argument("--tile", default="floor")
-    ap.add_argument("--grid", default=None, help="RxC: the frame is a grid of cameras (NVR multiplex)")
+    ap.add_argument("--grid", default=None, help="RxC, or 'auto' to detect the NVR layout from the seams in the first frames")
     ap.add_argument("--grid-margin", type=int, default=0)
     ap.add_argument("--start-time", default=None); ap.add_argument("--profile", default="common")
     ap.add_argument("--model", default="nano"); ap.add_argument("--fps", type=float, default=4.0)
@@ -84,6 +84,7 @@ def main() -> None:
     ap.add_argument("--max-width", type=int, default=0, help="decode width cap (0 = native); grids need native resolution")
     ap.add_argument("--out", default="data/episodes")
     ap.add_argument("--live-dir", default="data/live"); ap.add_argument("--live-every", type=int, default=4)
+    ap.add_argument("--tiles", default="auto", help="tile map JSON (cameras that see the same area share one linker); auto = data/tiles.json if present; none")
     a = ap.parse_args()
 
     profile = load_profile(a.profile)
@@ -91,7 +92,18 @@ def main() -> None:
     start_ms = parse_start(a.start_time)
     engine = connect(a.db)
     prov = Provenance(kb_version=1, pipeline_git="run_ingest")
-    spec = GridSpec.parse(a.grid, a.grid_margin) if a.grid else None
+    if a.grid and a.grid.lower() == "auto":
+        from vi.ingest import detect_grid
+        probe = VideoReader(a.camera, a.source, target_fps=1.0, max_width=1920, want_rgb=True)
+        sample = []
+        for f in probe.frames():
+            sample.append(f.rgb)
+            if len(sample) >= 5:
+                break
+        spec, ev = detect_grid(sample)
+        print(f"[ingest] grid auto -> {(str(spec.rows) + 'x' + str(spec.cols)) if spec else 'single camera'}  (seam evidence {ev})", flush=True)
+    else:
+        spec = GridSpec.parse(a.grid, a.grid_margin) if a.grid else None
     n_cams = spec.n if spec else 1
     reader = VideoReader(a.camera, a.source, target_fps=a.fps, max_width=(a.max_width or (1920 if spec else 640)), want_rgb=True)
     if a.model == "fake":
@@ -120,7 +132,18 @@ def main() -> None:
         vlm = _F()
     writer = EpisodeWriter(a.out)
     ids = cell_ids(spec) if spec else [a.camera]
-    cams = {cid: Cam(camera_id=cid, tile_id=(cid if spec else a.tile)) for cid in ids}
+    from vi.fusion import TileMap
+    tilemap = None
+    if a.tiles and a.tiles != "none":
+        tilemap = TileMap.load("data/tiles.json" if a.tiles == "auto" else a.tiles)
+    def tile_for(cid: str) -> str:
+        if tilemap is not None:
+            return tilemap.tile_of(cid)
+        return cid if spec else a.tile
+    cams = {cid: Cam(camera_id=cid, tile_id=tile_for(cid)) for cid in ids}
+    tile_linkers: dict[str, TubeLinker] = {}
+    if tilemap is not None:
+        print(f"[ingest] tiles: {tilemap.tiles}", flush=True)
     tick_ms = int(1000 / a.fps)
     frames = 0; t_wall0 = time.time(); pts0 = None
     stats: Counter = Counter()
@@ -130,7 +153,7 @@ def main() -> None:
         cam.w, cam.h = w, h
         if spec:
             cam.zones = [z for z in default_zones(cam.camera_id, w, h, tile_id=cam.tile_id) if z.kind == "exit"]
-            cam.zones.append(label_zone(spec, w, h, cam.camera_id, cam.tile_id))
+            cam.zones += label_zones(spec, w, h, cam.camera_id, cam.tile_id)
         else:
             zp = a.zones or (str(Path("data/zones") / (Path(a.source).stem + ".json")) if (Path("data/zones") / (Path(a.source).stem + ".json")).exists() else None)
             cam.zones = load_zones(zp, cam.camera_id) if zp else default_zones(cam.camera_id, w, h, tile_id=cam.tile_id)
@@ -140,7 +163,10 @@ def main() -> None:
         cam.gate = FrameDiffGate(cam.camera_id)
         cam.tracker = TRACKERS["byte"](cam.camera_id, exit_boxes=exits, keyframe_sink=kf.make_sink(lambda c=cam: c.current["frame"]))
         cam.compiler = EventCompiler(cam.camera_id, cam.zones, enter_ticks=1, exit_ticks=2, dwell_ms=5000, tile_id=cam.tile_id)
-        cam.linker = TubeLinker(cam.camera_id) if embedder else None
+        if embedder:
+            cam.linker = tile_linkers.setdefault(cam.tile_id, TubeLinker(cam.tile_id)) if tilemap is not None else TubeLinker(cam.camera_id)
+        else:
+            cam.linker = None
 
     def close_episode(cam: Cam, t_end_ms: int, status: EpisodeStatus) -> None:
         if cam.ep is None:
@@ -150,6 +176,7 @@ def main() -> None:
         for t in cam.ep_tubes:
             if cam.linker is not None and t.class_label == "person":
                 t.entity_id = cam.linker.entity_of(t.tube_id) or t.entity_id
+                t.embedding = cam.linker.embedding_of(t.tube_id)
             grade_tube(t, cam.w, cam.h, median_height_px=med, min_life_ms=int(profile.quality.min_life_s * 1000),
                        min_height_frac=profile.quality.min_height_frac, border_px=profile.quality.border_px)
             writer.write_tube(cam.ep, t)

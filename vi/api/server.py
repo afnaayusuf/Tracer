@@ -31,6 +31,7 @@ GREETING = ("hi", "hey", "hello", "yo", "hii", "helo")
 class AskIn(BaseModel):
     question: str
     mode: str | None = None
+    history: list[dict] | None = None      # previous exchanges [{"q","a","action"}], most recent last
 
 
 class IngestIn(BaseModel):
@@ -43,7 +44,7 @@ class IngestIn(BaseModel):
     model: str = "nano"
     fps: float = 4.0
     episode_min: float = 10.0
-    grid: str | None = None          # "4x4" for a multiplexed NVR export: every cell is a camera
+    grid: str | None = "auto"        # "auto" detects an NVR multiplex layout from the seams; "2x2"/"4x4" to force; null = single camera
     max_width: int = 0
 
 
@@ -107,7 +108,16 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
                     "mood": "bot", "evidence": [], "grounding": "greeting", "latency_ms": 0}
         b = footage_bounds(engine)
         now_ms = b[1] if b else int(time.time() * 1000)
-        r = ask_window(engine, q, backend(), now_ms, tz_name)
+        import concurrent.futures
+        deadline = float(os.environ.get("VI_ASK_DEADLINE_S", "80"))     # under Cloudflare's 100 s origin limit
+        pool = state.setdefault("pool", concurrent.futures.ThreadPoolExecutor(max_workers=1))
+        fut = pool.submit(ask_window, engine, q, backend(), now_ms, tz_name, 6, (inp.history or [])[-3:])
+        try:
+            r = fut.result(timeout=deadline)
+        except concurrent.futures.TimeoutError:
+            return {"text": f"That took longer than {int(deadline)} s, probably because the engine is busy ingesting. "
+                            "Ask a narrower question (a camera or a time window), or try again in a moment.",
+                    "mood": "botUnsure", "citations": [], "evidence": [], "grounding": "timeout", "latency_ms": int(deadline * 1000)}
         f = r["final"]
         text = f.get("text") or f.get("question") or ""
         unsure = f.get("action") == "clarify" or f.get("handled_by") in ("scope", "time") or not f.get("cited", False)
@@ -125,7 +135,7 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
                     evidence.append({"entity_id": c, "url": f"/keyframes/{rel}", "label": c.split(":")[-1]})
         return {"text": text, "mood": "botUnsure" if unsure else "bot", "citations": f.get("citations", []), "evidence": evidence,
                 "window": r.get("window"), "grounding": r.get("grounding"), "latency_ms": r.get("latency", {}).get("total_ms"),
-                "trace": r.get("trace", [])}
+                "action": f.get("action", "answer"), "trace": r.get("trace", [])}
 
     @app.get("/episodes")
     def episodes():
@@ -187,6 +197,27 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
     @app.get("/ingest/status")
     def ingest_state():
         return ingest_status()
+
+    tiles_path = Path(os.environ.get("VI_TILES", "data/tiles.json"))
+
+    @app.get("/tiles")
+    def tiles():
+        from vi.fusion import TileMap
+        tm = TileMap.load(tiles_path)
+        return {"path": str(tiles_path), "tiles": tm.tiles if tm else None, "affinity": tm.affinity if tm else None}
+
+    @app.post("/tiles/recompute")
+    def tiles_recompute():
+        """Learn which cameras see the same area from the entities recorded so far, and save the map.
+        The next ingest start uses it (one identity per tile instead of per camera)."""
+        from vi.fusion import discover_tiles
+        from vi.fusion.tiles import entities_for_affinity
+        from vi.agent.tools import cameras_in_store
+        ents = entities_for_affinity(engine)
+        tm = discover_tiles(ents, cameras=cameras_in_store(engine))
+        tm.save(tiles_path)
+        return {"tiles": tm.tiles, "affinity": tm.affinity, "entities_used": len(ents), "saved": str(tiles_path),
+                "note": "restart the ingest (POST /ingest/stop then /ingest/start) to apply"}
 
     if web_dir.exists():
         app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="web")

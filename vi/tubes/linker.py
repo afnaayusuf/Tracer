@@ -35,14 +35,17 @@ class _Entity:
     lost_at_ms: int | None = None      # set when its tube closed (lost/exited) OR went occluded; None while seen
     closed_as_exit: bool = False
     live_tube_id: str | None = None    # an occluded-but-live tube: linking a newborn to this entity absorbs it
+    live_by_cam: dict = field(default_factory=dict)   # camera -> live tube id (a tile entity is seen on several cameras at once)
+    cameras: set = field(default_factory=set)
 
 
 class TubeLinker:
     def __init__(self, camera_id: str, sim_thr: float = 0.88, max_gap_ms: int = 30_000,
                  max_jump_px: float = 400.0, ema_alpha: float = 0.3, exemplars: int = 5,
                  exited_sim_thr: float = 0.90, near_sim_thr: float = 0.85, near_gap_ms: int = 5000,
-                 near_jump_px: float = 200.0, aux_thr: float = 0.80):
-        self.camera_id = camera_id
+                 near_jump_px: float = 200.0, aux_thr: float = 0.80, cross_camera_sim_thr: float = 0.85):
+        self.camera_id = camera_id          # for a tile linker this is the tile id; tubes carry their own camera_id
+        self.cross_camera_sim_thr = cross_camera_sim_thr
         self.sim_thr = sim_thr
         # a tube reappearing within a few seconds and a couple of body-widths of where one vanished
         # is the same person unless appearance says otherwise: the bar drops to near_sim_thr there
@@ -69,7 +72,8 @@ class TubeLinker:
         ent = _Entity(entity_id=f"{self.camera_id}:E{self._seq}", tube_ids=[tube.tube_id], ema=emb.copy(),
                       exemplars=[emb.copy()], last_box_center=_center(tube), last_box_h=tube.box.height,
                       aux=None if aux is None else aux.copy(), born_ms=tube.born.corrected_ms(),
-                      last_active_ms=tube.last_seen.corrected_ms())
+                      last_active_ms=tube.last_seen.corrected_ms(), cameras={tube.camera_id})
+        ent.live_by_cam[tube.camera_id] = tube.tube_id
         self._entities[ent.entity_id] = ent
         self._tube_entity[tube.tube_id] = ent.entity_id
         return ent
@@ -85,6 +89,12 @@ class TubeLinker:
         cx, cy = _center(tube)
         out = []
         for e in self._entities.values():
+            if tube.camera_id in e.live_by_cam:               # already seen on THIS camera right now: a different person here
+                continue
+            if e.cameras and tube.camera_id not in e.cameras:  # another camera of the tile: concurrent sighting is allowed
+                if e.live_by_cam or e.lost_at_ms is None or t_ms - e.lost_at_ms <= self.max_gap_ms:
+                    out.append(e)                            # no distance gate across cameras
+                continue
             if e.lost_at_ms is None or t_ms - e.lost_at_ms > self.max_gap_ms:
                 continue
             if ((cx - e.last_box_center[0]) ** 2 + (cy - e.last_box_center[1]) ** 2) ** 0.5 > self.max_jump_px:
@@ -94,6 +104,8 @@ class TubeLinker:
 
     # ---------------------------------------------------------------- API
     def _thr(self, ent: _Entity, tube: Tube, t_ms: int) -> float:
+        if ent.cameras and tube.camera_id not in ent.cameras:
+            return self.cross_camera_sim_thr                  # a different view of the same person: appearance only
         if ent.closed_as_exit:
             return self.exited_sim_thr
         cx, cy = _center(tube)
@@ -111,9 +123,13 @@ class TubeLinker:
             thr = self._thr(best, tube, t_ms)
             if sim >= thr:
                 prev = best.tube_ids[-1]
-                absorbed = best.live_tube_id                 # the occluded ghost this newborn replaces
+                cross = tube.camera_id not in best.cameras
+                absorbed = None if cross else best.live_tube_id   # the occluded ghost this newborn replaces (same camera)
                 best.tube_ids.append(tube.tube_id)
-                best.lost_at_ms, best.live_tube_id = None, None
+                if not cross:
+                    best.lost_at_ms, best.live_tube_id = None, None
+                best.cameras.add(tube.camera_id)
+                best.live_by_cam[tube.camera_id] = tube.tube_id
                 self._tube_entity[tube.tube_id] = best.entity_id
                 self.on_refresh(tube, emb, aux)
                 self.relinks += 1
@@ -121,7 +137,7 @@ class TubeLinker:
                 return Event(event_id="ev_" + hashlib.sha1(f"relink|{prev}|{tube.tube_id}".encode()).hexdigest()[:16],
                              type=EventType.relink, t=CamTime(cam_utc_ms=t_ms), camera_id=self.camera_id,
                              subject_tube_ids=[prev, tube.tube_id], subject_entity_ids=[best.entity_id],
-                             payload={"similarity": round(sim, 3), "threshold": round(thr, 2),
+                             payload={"similarity": round(sim, 3), "threshold": round(thr, 2), "cross_camera": cross,
                                       "gap_ms": t_ms - (tube.born.corrected_ms()), "absorbed_tube": absorbed},
                              confidence=min(1.0, sim))
         self._new_entity(tube, emb, aux)
@@ -150,12 +166,14 @@ class TubeLinker:
         if eid is None:
             return
         e = self._entities[eid]
-        if tube.state == TubeState.occluded:
+        if tube.state == TubeState.occluded:                 # not seen: it is a candidate, not a "seen here" exclusion
+            e.live_by_cam.pop(tube.camera_id, None)
             if e.lost_at_ms is None:
                 e.lost_at_ms = tube.occluded_since_ms if tube.occluded_since_ms is not None else t_ms
             e.live_tube_id = tube.tube_id
             e.last_box_center, e.last_box_h = _center(tube), tube.box.height
         elif tube.state == TubeState.active:
+            e.live_by_cam[tube.camera_id] = tube.tube_id
             e.last_active_ms = t_ms
             if e.live_tube_id == tube.tube_id:
                 e.lost_at_ms, e.live_tube_id = None, None   # seen again: no longer a candidate
@@ -172,8 +190,8 @@ class TubeLinker:
             cx, cy = _center(tube)
             best, best_sim = None, 0.0
             for o in self._entities.values():
-                if o is e or o.lost_at_ms is not None:
-                    continue                                              # only live, currently seen entities
+                if o is e or o.lost_at_ms is not None or tube.camera_id not in o.live_by_cam:
+                    continue                                              # only entities live on THIS camera
                 overlap = min(tube.last_seen.corrected_ms(), o.last_active_ms) - max(tube.born.corrected_ms(), o.born_ms)
                 dist = ((cx - o.last_box_center[0]) ** 2 + (cy - o.last_box_center[1]) ** 2) ** 0.5
                 if overlap > self.max_coexist_ms or dist > self.near_jump_px:
@@ -194,6 +212,7 @@ class TubeLinker:
                              payload={"similarity": round(best_sim, 3), "kind": "merge_on_death", "merged_entity": eid},
                              confidence=min(1.0, best_sim))
         e.last_box_center, e.last_box_h = _center(tube), tube.box.height
+        e.live_by_cam.pop(tube.camera_id, None)
         e.lost_at_ms = t_ms if tube.state in (TubeState.lost, TubeState.occluded, TubeState.exited) else None
         e.closed_as_exit = tube.state == TubeState.exited
         e.live_tube_id = None
@@ -201,6 +220,12 @@ class TubeLinker:
 
     def entity_of(self, tube_id: str) -> str | None:
         return self._tube_entity.get(tube_id)
+
+    def embedding_of(self, tube_id: str) -> list[float] | None:
+        eid = self._tube_entity.get(tube_id)
+        if eid is None or eid not in self._entities:
+            return None
+        return [round(float(x), 5) for x in self._entities[eid].ema]
 
     @property
     def entities(self) -> int:

@@ -13,7 +13,7 @@ class GridSpec:
     rows: int
     cols: int
     margin_px: int = 0                     # border between cells, if the NVR draws one
-    label_corner: str = "top-right"        # where the burned-in camera label is
+    label_corners: tuple[str, ...] = ("top-right", "bottom-left")   # channel name / timestamp overlays (NVRs use both)
     label_frac: tuple[float, float] = (0.36, 0.14)   # label box as a fraction of cell width/height
 
     @classmethod
@@ -48,19 +48,60 @@ def split(frame: np.ndarray, spec: GridSpec) -> list[np.ndarray]:
     return [np.ascontiguousarray(frame[y1:y2, x1:x2]) for (x1, y1, x2, y2) in cell_boxes(spec, w, h)]
 
 
-def label_zone(spec: GridSpec, cell_w: int, cell_h: int, camera_id: str, tile_id: str):
-    """Media zone over the burned-in label corner of one cell (E-DET-05)."""
+def label_zones(spec: GridSpec, cell_w: int, cell_h: int, camera_id: str, tile_id: str) -> list:
+    """Media zones over the burned-in overlay corners of one cell (E-DET-05)."""
     from vi.events import Zone
     lw, lh = int(cell_w * spec.label_frac[0]), int(cell_h * spec.label_frac[1])
-    if spec.label_corner == "top-left":
-        poly = [(0, 0), (lw, 0), (lw, lh), (0, lh)]
-    elif spec.label_corner == "bottom-right":
-        poly = [(cell_w - lw, cell_h - lh), (cell_w, cell_h - lh), (cell_w, cell_h), (cell_w - lw, cell_h)]
-    elif spec.label_corner == "bottom-left":
-        poly = [(0, cell_h - lh), (lw, cell_h - lh), (lw, cell_h), (0, cell_h)]
-    else:
-        poly = [(cell_w - lw, 0), (cell_w, 0), (cell_w, lh), (cell_w - lw, lh)]
-    return Zone(zone_id="label", camera_id=camera_id, tile_id=tile_id, kind="media", polygon=poly)
+    polys = {"top-left": [(0, 0), (lw, 0), (lw, lh), (0, lh)],
+             "top-right": [(cell_w - lw, 0), (cell_w, 0), (cell_w, lh), (cell_w - lw, lh)],
+             "bottom-left": [(0, cell_h - lh), (lw, cell_h - lh), (lw, cell_h), (0, cell_h)],
+             "bottom-right": [(cell_w - lw, cell_h - lh), (cell_w, cell_h - lh), (cell_w, cell_h), (cell_w - lw, cell_h)]}
+    return [Zone(zone_id=f"label_{c.replace('-', '_')}", camera_id=camera_id, tile_id=tile_id, kind="media", polygon=polys[c])
+            for c in spec.label_corners if c in polys]
+
+
+def label_zone(spec: GridSpec, cell_w: int, cell_h: int, camera_id: str, tile_id: str):
+    return label_zones(spec, cell_w, cell_h, camera_id, tile_id)[0]
+
+
+CANDIDATES = [(2, 2), (3, 3), (4, 4), (1, 2), (2, 1), (2, 3), (3, 2), (2, 4), (4, 2)]
+
+
+def seam_scores(gray: np.ndarray, rows: int, cols: int, band: int = 3) -> list[float]:
+    """For every interior seam of an R×C layout, how much stronger the image gradient is across the
+    seam than elsewhere (1.0 = no seam). NVR multiplexes have hard borders between cells."""
+    h, w = gray.shape[:2]
+    g = gray.astype(np.float32)
+    dx = np.abs(np.diff(g, axis=1)).mean(axis=0)       # per column
+    dy = np.abs(np.diff(g, axis=0)).mean(axis=1)       # per row
+    base_x, base_y = float(np.median(dx)) + 1e-3, float(np.median(dy)) + 1e-3
+    scores = []
+    for c in range(1, cols):
+        x = int(round(w * c / cols))
+        scores.append(float(dx[max(0, x - band): min(len(dx), x + band)].max()) / base_x)
+    for r in range(1, rows):
+        y = int(round(h * r / rows))
+        scores.append(float(dy[max(0, y - band): min(len(dy), y + band)].max()) / base_y)
+    return scores
+
+
+def detect_grid(frames: list[np.ndarray], min_ratio: float = 6.0) -> tuple[GridSpec | None, dict]:
+    """Pick the layout with the MOST cells whose WEAKEST seam is still clearly a border (min seam
+    ratio >= min_ratio). A 4×4 contains the 2×2's seams, so it qualifies only if its quarter seams
+    are strong too; a 2×2 outranks 1×2 because its horizontal seam also qualifies.
+    Returns (spec or None for a single camera, evidence)."""
+    grays = [f.mean(axis=2).astype(np.float32) if f.ndim == 3 else f.astype(np.float32) for f in frames]
+    evidence = {}
+    best = None
+    for (r, c) in sorted(CANDIDATES, key=lambda rc: -(rc[0] * rc[1])):
+        per_frame = [seam_scores(g, r, c) for g in grays]
+        mins = [min(s) for s in per_frame]
+        score = float(np.median(mins))
+        evidence[f"{r}x{c}"] = round(score, 1)
+        if score >= min_ratio and best is None:
+            best = (r, c)
+    return (GridSpec(rows=best[0], cols=best[1]) if best else None), evidence
+
 
 
 def compose(cells: list[np.ndarray], spec: GridSpec) -> np.ndarray:
