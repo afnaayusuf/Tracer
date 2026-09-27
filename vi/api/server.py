@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -71,7 +72,6 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
     engine = connect(db_url)
     app = FastAPI(title="vi-engine")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-    import threading
     state = {"backend": None, "ingest": None, "started": time.time(), "model": model, "backend_name": backend_name,
              "writer": None, "model_lock": threading.Lock(), "questions_waiting": 0, "sheets": 0, "sheet_ms": [], "restarts": 0}
     tiles_path = Path(os.environ.get("VI_TILES") or (live_dir / "tiles.json"))
@@ -283,7 +283,6 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         state["ingest_params"] = inp
         threading.Thread(target=_watch_ingest, args=(state["ingest"], inp), daemon=True).start()
         if inp.tiles == "auto" and not tiles_path.exists() and inp.auto_tiles_after_min > 0:
-            import threading
             threading.Thread(target=_auto_tiles, args=(inp, state["ingest"]), daemon=True).start()
         return {"started": True, "pid": state["ingest"].pid, "cmd": " ".join(cmd), "auto_tiles": inp.tiles == "auto" and not tiles_path.exists()}
 

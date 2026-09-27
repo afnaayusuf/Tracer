@@ -148,3 +148,25 @@ def test_learned_media_zone_after_two_rejections(tmp_path):
     assert cam.media == []
     apply([{"tube_id": "cam03:9000:1", "attributes": {"modality": "rgb", "description": "NOT A PERSON; a poster", "confidence": 0.9}}])
     assert len(cam.media) == 1 and cam.media[0].kind == "media" and m._iou((0, 0, 10, 10), (5, 5, 15, 15)) > 0
+
+
+def test_ingest_start_through_the_api_actually_starts(store_with_footage, tmp_path):
+    """The exact call the session script makes; a 500 here is what session 37 shipped."""
+    import time as _t
+    from fastapi.testclient import TestClient
+    from vi.api import create_app
+    from vi.ingest.synthetic import write_walk_clip
+    clip = write_walk_clip(tmp_path / "walk.mp4", seconds=4, fps=10)
+    db = f"sqlite+pysqlite:///{tmp_path / 'vi.db'}"
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", live_dir=str(tmp_path / "live"), load_backend=False)
+    c = TestClient(app, raise_server_exceptions=True)
+    r = c.post("/ingest/start", json={"source": str(clip), "grid": None, "start_time": "2026-09-27T10:00:00+00:00", "realtime": False,
+                                      "profile": "tier3_office", "writer": "none", "reid": "hist", "model": "fake", "tiles": "one", "fps": 5})
+    assert r.status_code == 200 and r.json()["started"], r.text
+    for _ in range(60):
+        st = c.get("/ingest/status").json()
+        if not st["running"]:
+            break
+        _t.sleep(0.5)
+    assert st["exit_code"] == 0 and st["restarts"] == 0, st
+    c.post("/ingest/stop")
