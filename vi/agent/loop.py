@@ -32,12 +32,15 @@ TOOL_SPECS = {
     "count_entities": "Distinct confirmed people in a window. args: t_start_ms, t_end_ms (omit for whole episode)",
     "entities_present": "Entities seen for at least min_coverage of the episode ('stayed the whole time'). args: min_coverage (default 0.9)",
     "coverage": "Per-entity seen interval and coverage fraction. args: none",
+    "activities": "Activity timeline (what each person did, objects within reach, where they looked). args: entity_id (optional), t_start_ms, t_end_ms",
+    "inspect": "SLOW: look at a person's latest keyframe (or the live frame) with a specific question the script cannot answer "
+               "(what exactly they hold, how they do something, where they look). args: question, entity_id (optional)",
 }
 
 
 class ToolStep(BaseModel):
     action: Literal["tool"] = "tool"
-    tool: Literal["search_events", "search_tubes", "search_entities", "get_script", "clip", "count_entities", "entities_present", "coverage"]
+    tool: Literal["search_events", "search_tubes", "search_entities", "get_script", "clip", "count_entities", "entities_present", "coverage", "activities", "inspect"]
     args: dict[str, Any] = Field(default_factory=dict)
     why: str = Field("", max_length=400)
 
@@ -467,9 +470,11 @@ WINDOW_TOOLS = {"count_entities", "entities_present", "coverage"}
 SYSTEM_LIVE_SUFFIX = """
 You are answering about recorded footage. FOOTAGE: {start}–{end} ({tz}); the latest processed moment is {now}.
 The scene script below covers only the window {ws}–{we}. If the question needs a different time, say which
-window you are answering about. W-ids (W1, W2…) are people; a person seen on several cameras has one W-id and several
-camera tracks (cam03:E1 …). Count people by W-ids, never by camera tracks. A track id (site:E5, cam02:E1) is a PERSON's
-track on a camera, never a place: never write "at site:E1" or "enters site:E5". Places are zones (counter, exit_left …)
+window you are answering about. The ACTIVITY lines say what each person was doing, what was within reach and where they
+looked, sampled every few seconds: use them for "what is he doing / what objects / where does he look". If the question
+needs detail the lines do not have, call inspect with the question and the W-id. W-ids (W1, W2…) are people; a person seen on several cameras has one W-id and several
+camera tracks (cam03:E1 …). Count people by W-ids, never by camera tracks. A track id (person:E5, cam02:E1) is a PERSON's
+track on a camera, never a place: never write "at person:E1" or "moves between E2 and E3". Places are zones and cameras
 and cameras. A track whose looks say NOT A PERSON is a false detection: ignore it. When the cast says "hard evidence: at most N seen
 at once", the footage proves no more than N people were ever visible together; several W-ids with the same looks are
 probably one person seen from different angles, and you should say so. If nothing in the window matches, say so plainly. Never guess names: people are
@@ -504,6 +509,9 @@ def _window_tool(engine: Engine, step: ToolStep, ws: int, we: int, camera_id: st
         return T.entities_present_window(engine, a, b, float(args.get("min_coverage", 0.9)), camera_id=camera_id)
     if step.tool == "coverage":
         return T.coverage_window(engine, a, b, camera_id=camera_id)
+    if step.tool == "activities":
+        eid = args.get("entity_id")
+        return T.activities_window(engine, a, b, entity_id=eid if eid and not str(eid).startswith("W") else None, camera_id=camera_id)
     return run_tool(engine, step, None)
 
 
@@ -525,7 +533,7 @@ def resolve_followup(question: str, history: list[dict] | None) -> tuple[str, st
 
 
 def ask_window(engine: Engine, question: str, backend, now_ms: int, tz_name: str = "UTC", max_steps: int = 6,
-               history: list[dict] | None = None) -> dict:
+               history: list[dict] | None = None, inspector=None) -> dict:
     """Live-footage question answering: scope check -> time grounding -> window script -> model loop
     with window-aware numeric tools. Refusals and clarifications happen before any model call."""
     t_start_total = time.perf_counter()
@@ -585,7 +593,19 @@ def ask_window(engine: Engine, question: str, backend, now_ms: int, tz_name: str
         if isinstance(step, ToolStep):
             t0 = time.perf_counter()
             try:
-                result = _window_tool(engine, step, ws, we, cam); text = _compact(result); err = None
+                if step.tool == "inspect":
+                    if inspector is None:
+                        result = {"answer": "inspect is not available in this deployment"}
+                    else:
+                        args = {k: v for k, v in step.args.items() if v is not None}
+                        eid = args.get("entity_id")
+                        if eid and eid.startswith("W"):           # a W-id: inspect its longest track
+                            members = T.world_members(engine, ws, we, cam).get(eid, [])
+                            eid = members[0] if members else None
+                        result = inspector(str(args.get("question", question)), eid, cam, None)
+                else:
+                    result = _window_tool(engine, step, ws, we, cam)
+                text = _compact(result); err = None
             except Exception as e:
                 result, text, err = None, f"error: {type(e).__name__}: {e}", str(e)
             tool_ms += (time.perf_counter() - t0) * 1000

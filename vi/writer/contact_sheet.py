@@ -29,6 +29,18 @@ WRITER_PROMPT = (
 )
 
 
+ACTIVITY_PROMPT = (
+    "This image is a grid of cells; each cell shows one person with their surroundings, cropped from a camera, with the "
+    "cell number in the yellow strip under it (a label, not part of the scene). For EVERY cell describe what that person is "
+    "doing RIGHT NOW. Reply with a JSON array, one object per cell, no prose:\n"
+    '[{"cell_id": 0, "is_person": true or false, "activity": what they are doing, <= 10 words (e.g. "packing items into a cardboard box"), '
+    '"objects_nearby": up to 6 nouns within their reach (e.g. ["cardboard box","tape roll","paper"]), '
+    '"attention": where they are looking, <= 8 words (e.g. "down at the box"), "posture": one of standing/sitting/bending/walking/lying/reaching, '
+    '"carried_item": short text or null, "confidence": 0-1}]\n'
+    "Describe only what is visible; do not guess intentions."
+)
+
+
 def pack_sheet(crops: list[np.ndarray], cell: int = 224, cols: int = 4, caption: int = 22):
     """Grid with hard borders and a number in a caption strip BELOW each crop, never over it (a badge
     on top of a 30-px crop is what the model ends up describing). Small crops are upscaled to fill
@@ -87,9 +99,14 @@ def parse_sheet_reply(text: str, tube_ids: list[str], modality: Modality = Modal
             desc_bits.append(f"role: {str(it['role'])[:30]}")
         conf = it.get("confidence", 0.6)
         conf = float(conf) if isinstance(conf, (int, float)) else 0.6
+        objs = it.get("objects_nearby") or []
+        objs = [str(o)[:30] for o in objs if isinstance(o, (str, int))][:6] if isinstance(objs, list) else []
         kwargs = dict(modality=modality, carried_item=(str(it["carried_item"])[:60] if it.get("carried_item") else None),
                       carried_item_confidence=0.6 if it.get("carried_item") else 0.0,
-                      description="; ".join(b for b in desc_bits if b)[:240], confidence=max(0.0, min(1.0, conf)))
+                      description="; ".join(b for b in desc_bits if b)[:240], confidence=max(0.0, min(1.0, conf)),
+                      activity=(str(it["activity"])[:80] if it.get("activity") else None), objects_nearby=objs,
+                      attention=(str(it["attention"])[:60] if it.get("attention") else None),
+                      posture=(str(it["posture"])[:30] if it.get("posture") else None))
         if modality.has_color:
             kwargs.update(top_color=_color(it.get("top_color")), bottom_color=_color(it.get("bottom_color")))
         else:
@@ -131,9 +148,29 @@ class WriterVLM:
         self.calls = 0
         self.last_ms = 0.0
 
-    def describe(self, crops: list[np.ndarray], tube_ids: list[str], modality: Modality = Modality.rgb) -> ContactSheetResult | None:
+    def inspect(self, image: np.ndarray, question: str, max_new_tokens: int = 200) -> str:
+        """The slow path: one frame or crop, the user's actual question, plain-text answer."""
+        from PIL import Image
+        im = Image.fromarray(np.ascontiguousarray(image)).convert("RGB")
+        messages = [{"role": "user", "content": [{"type": "image", "image": im},
+                    {"type": "text", "text": "Answer the question about this camera frame in <= 40 words, describing only what is visible. Question: " + question}]}]
+        t0 = time.perf_counter()
+        try:
+            inputs = self.proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt", enable_thinking=False)
+        except TypeError:
+            inputs = self.proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt")
+        inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+        with self.torch.no_grad():
+            out = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        gen = out[0][inputs["input_ids"].shape[1]:]
+        tok = getattr(self.proc, "tokenizer", self.proc)
+        self.last_ms = (time.perf_counter() - t0) * 1000
+        return re.sub(r"<think>.*?</think>", "", tok.decode(gen, skip_special_tokens=True), flags=re.DOTALL).strip()
+
+    def describe(self, crops: list[np.ndarray], tube_ids: list[str], modality: Modality = Modality.rgb, mode: str = "appearance") -> ContactSheetResult | None:
         sheet = pack_sheet(crops)
-        messages = [{"role": "user", "content": [{"type": "image", "image": sheet}, {"type": "text", "text": WRITER_PROMPT}]}]
+        prompt = ACTIVITY_PROMPT if mode == "activity" else WRITER_PROMPT
+        messages = [{"role": "user", "content": [{"type": "image", "image": sheet}, {"type": "text", "text": prompt}]}]
         t0 = time.perf_counter()
         try:
             inputs = self.proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=True,

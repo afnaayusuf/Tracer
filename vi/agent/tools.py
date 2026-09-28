@@ -8,7 +8,7 @@ import time
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.engine import Engine
 
-from vi.store.db import entities, episodes, events, insert_ignore, scripts, tubes
+from vi.store.db import entities, episodes, events, insert_ignore, patches, scripts, tubes
 
 
 def _ts(ms: int, t0: int = 0) -> str:
@@ -323,7 +323,7 @@ def world_groups(rows: list[dict], sim_thr: float = 0.85, max_gap_ms: int = 60_0
             parent[x] = parent[parent[x]]; x = parent[x]
         return x
     def same_tile(a: dict, b: dict) -> bool:
-        if a["entity_id"].startswith("site:") or b["entity_id"].startswith("site:"):
+        if a["entity_id"].startswith(("site:", "person:")) or b["entity_id"].startswith(("site:", "person:")):
             return True                                              # ingested as one site (tiles=one)
         if tile_map is None:
             return False
@@ -422,6 +422,26 @@ def world_members(engine: Engine, t_start_ms: int, t_end_ms: int, camera_id: str
     return out
 
 
+def activities_window(engine: Engine, t_start_ms: int, t_end_ms: int, entity_id: str | None = None, camera_id: str | None = None,
+                      limit: int = 400) -> list[dict]:
+    """The activity timeline: what each person was doing, what was within reach, where they looked."""
+    with engine.connect() as conn:
+        rows = [dict(r._mapping) for r in conn.execute(select(patches).where(and_(patches.c.source == "vlm:activity",
+                                                                                   patches.c.produced_at_ms >= t_start_ms, patches.c.produced_at_ms <= t_end_ms))
+                                                       .order_by(patches.c.produced_at_ms).limit(limit))]
+    out = []
+    for r in rows:
+        p = r["payload"] or {}
+        if entity_id and p.get("entity_id") != entity_id:
+            continue
+        if camera_id and p.get("camera_id") != camera_id:
+            continue
+        out.append({"t_ms": r["produced_at_ms"], "entity_id": p.get("entity_id"), "camera_id": p.get("camera_id"), "activity": p.get("activity"),
+                    "objects_nearby": p.get("objects_nearby") or [], "attention": p.get("attention"), "posture": p.get("posture"),
+                    "carried_item": p.get("carried_item"), "confidence": r["confidence"]})
+    return out
+
+
 def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str = "UTC", max_chars: int = 7000,
                   max_events: int = 120, camera_id: str | None = None) -> str:
     """Compact script for a time window across episodes: absolute clock times, confirmed cast with
@@ -443,7 +463,7 @@ def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str =
              + (f"camera {camera_id}" if camera_id else f"cameras {','.join(all_cams)}"),
              f"PEOPLE: {n_people}" + (f"  (hard evidence: at most {hard} seen at once by any one camera; {len(cast)} camera tracks in total)"
                                      if len(all_cams) > 1 else ""),
-             "  Each person has a W-id. Track ids like site:E3 or cam02:E1 are the SAME person seen by a camera; they are never places."]
+             "  Each W-id is one person. Track ids like person:E3 or cam02:E1 are the same person as recorded by a camera; they are never places."]
     by_world: dict[str, list[dict]] = {}
     for c in cast:
         by_world.setdefault(worlds[c["entity_id"]], []).append(c)
@@ -454,6 +474,21 @@ def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str =
         lines.append(f"  {w}  person  seen {clock(first)}–{clock(last)}  on {','.join(cams)}" + (f"  looks: {looks}" if looks else ""))
         lines.append("      tracks: " + "; ".join(f"{m['entity_id']} ({','.join(m['cameras'])} {clock(m['first_seen_ms'])}–{clock(m['last_seen_ms'])})" for m in members)
                      + (f"  keyframe {members[0]['keyframe']}" if members[0].get("keyframe") else ""))
+    acts = activities_window(engine, t_start_ms, t_end_ms, camera_id=camera_id)
+    if acts:
+        lines.append(f"ACTIVITY (sampled every ~12 s; what they did, what was within reach, where they looked): {len(acts)} entries")
+        ent_world = {eid: w for eid, w in worlds.items()}
+        shown = acts if len(acts) <= 40 else acts[-40:]
+        if len(acts) > 40:
+            lines.append(f"  (showing the last 40)")
+        for x in shown:
+            who = ent_world.get(x["entity_id"], x["entity_id"] or "?")
+            bits = [x["activity"] or "—"]
+            if x["objects_nearby"]: bits.append("nearby: " + ", ".join(x["objects_nearby"]))
+            if x["attention"]: bits.append("looking " + x["attention"])
+            if x["posture"]: bits.append(x["posture"])
+            if x["carried_item"]: bits.append("holding " + x["carried_item"])
+            lines.append(f"  {clock(x['t_ms'])}  {who}  " + "; ".join(bits))
     ev_conds = [events.c.t_ms >= t_start_ms, events.c.t_ms <= t_end_ms]
     if camera_id:
         ev_conds.append(events.c.camera_id == camera_id)

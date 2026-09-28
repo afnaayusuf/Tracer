@@ -170,3 +170,51 @@ def test_ingest_start_through_the_api_actually_starts(store_with_footage, tmp_pa
         _t.sleep(0.5)
     assert st["exit_code"] == 0 and st["restarts"] == 0, st
     c.post("/ingest/stop")
+
+
+def test_activity_timeline_and_inspect_tool(store_with_footage, tmp_path):
+    """Activity sheets become patches; the script shows them; the agent can call inspect."""
+    import json as _json
+    from fastapi.testclient import TestClient
+    from vi.agent import ask_window, footage_bounds
+    from vi.agent.tools import activities_window, window_script
+    from vi.api import create_app
+    from vi.episode import EpisodeWriter
+    from vi.schemas import EnrichmentPatch
+    from vi.schemas.episode import episode_record_adapter
+    from vi.store import IncrementalLoader, connect
+    db, tmp = store_with_footage
+    engine = connect(db); b = footage_bounds(engine)
+    # write an activity patch into the (closed) episode file and load it incrementally
+    ep_path = next((tmp / "ep").glob("*.jsonl"))
+    ep_id = next(r for r in EpisodeWriter.read(ep_path) if r.kind == "header").episode_id
+    tube_id = next(r for r in EpisodeWriter.read(ep_path) if r.kind == "tube").tube.tube_id
+    entity_id = next(r for r in EpisodeWriter.read(ep_path) if r.kind == "tube").tube.entity_id or f"anon:{tube_id}"
+    patch = EnrichmentPatch(patch_id="pt_test_1", tube_id=tube_id, produced_at_ms=b[0] + 1000, source="vlm:activity",
+                            payload={"activity": "packing items into a box", "objects_nearby": ["cardboard box", "tape"], "attention": "down at the box",
+                                     "posture": "bending", "entity_id": entity_id, "camera_id": "cam1"}, confidence=0.8)
+    with ep_path.open("a") as f:
+        f.write(_json.dumps({"kind": "patch", "episode_id": ep_id, "patch": patch.model_dump(mode="json")}) + "\n")
+    IncrementalLoader(engine).flush(ep_path)
+    acts = activities_window(engine, b[0], b[1] + 5000)
+    assert acts and acts[0]["activity"] == "packing items into a box" and "tape" in acts[0]["objects_nearby"]
+    script = window_script(engine, b[0], b[1] + 5000)
+    assert "ACTIVITY" in script and "packing items into a box" in script and "looking down at the box" in script
+    # inspect through the loop with an injected inspector
+    class Inspector:
+        name = "insp"
+        def __init__(self): self.n = 0
+        def complete(self, messages, schema):
+            self.n += 1
+            if self.n == 1:
+                return _json.dumps({"action": "tool", "tool": "inspect", "args": {"question": "what is he holding?", "entity_id": "W1"}, "why": "detail"})
+            assert "roll of tape" in messages[-1]["content"]
+            return _json.dumps({"action": "answer", "text": "He is holding a roll of tape (inspected keyframe).", "citations": [entity_id], "confidence": 0.8})
+    calls = []
+    def fake_inspect(question, eid=None, cam=None, t=None):
+        calls.append((question, eid)); return {"answer": "a roll of tape in his right hand", "ref": "kf://cam1/x.jpg"}
+    r = ask_window(engine, "what exactly is he holding?", Inspector(), b[1], "UTC", inspector=fake_inspect)
+    assert calls and calls[0][1] is not None and "tape" in r["final"]["text"]
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", keyframes_dir=str(tmp / "keyframes"), live_dir=str(tmp / "live"), load_backend=False)
+    c = TestClient(app)
+    assert "answer" in c.post("/inspect", json={"question": "what is on the counter?", "entity_id": entity_id}).json()

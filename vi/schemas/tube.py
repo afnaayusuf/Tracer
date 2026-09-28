@@ -52,6 +52,10 @@ class Attributes(BaseModel):
     carried_item: str | None = Field(None, max_length=60)
     carried_item_confidence: float = Field(0.0, ge=0.0, le=1.0)
     description: str = Field("", max_length=240)
+    activity: str | None = Field(None, max_length=80)          # what the person is doing right now
+    objects_nearby: list[str] = Field(default_factory=list)     # within reach, up to 6 nouns
+    attention: str | None = Field(None, max_length=60)         # where they are looking
+    posture: str | None = Field(None, max_length=30)           # standing / sitting / bending / walking / lying
     enhanced: bool = False            # E-FOV-01: SR or heavy enhancement applied
     confidence: float = Field(0.0, ge=0.0, le=1.0)
 
@@ -117,7 +121,7 @@ class EnrichmentPatch(BaseModel):
     patch_id: str
     tube_id: str
     produced_at_ms: int
-    source: Literal["vlm", "pose", "ocr", "siglip", "reid", "sr"]
+    source: Literal["vlm", "vlm:activity", "pose", "ocr", "siglip", "reid", "sr"]
     payload: dict[str, Any]
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     modality: Modality = Modality.rgb

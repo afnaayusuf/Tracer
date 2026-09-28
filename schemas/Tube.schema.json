@@ -93,6 +93,52 @@
           "title": "Description",
           "type": "string"
         },
+        "activity": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activity"
+        },
+        "objects_nearby": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Objects Nearby",
+          "type": "array"
+        },
+        "attention": {
+          "anyOf": [
+            {
+              "maxLength": 60,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attention"
+        },
+        "posture": {
+          "anyOf": [
+            {
+              "maxLength": 30,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Posture"
+        },
         "enhanced": {
           "default": false,
           "title": "Enhanced",

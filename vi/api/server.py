@@ -39,6 +39,14 @@ class DescribeIn(BaseModel):
     camera_id: str
     tube_ids: list[str]
     crops_jpeg_b64: list[str]              # one JPEG per tube, base64
+    mode: str = "appearance"               # appearance (at birth) | activity (at cadence: doing / objects / attention / posture)
+
+
+class InspectIn(BaseModel):
+    question: str
+    entity_id: str | None = None
+    camera_id: str | None = None
+    t_ms: int | None = None
 
 
 class IngestIn(BaseModel):
@@ -114,18 +122,76 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         crops = [np.asarray(Image.open(io.BytesIO(base64.b64decode(b))).convert("RGB")) for b in inp.crops_jpeg_b64]
         w = writer()
         if w == "fake":
-            cells = [{"tube_id": t, "attributes": {"modality": "rgb", "description": "person", "top_color": "orange", "confidence": 0.7}} for t in inp.tube_ids]
+            cells = [{"tube_id": t, "attributes": {"modality": "rgb", "description": "person", "top_color": "orange", "confidence": 0.7,
+                                                   **({"activity": "packing boxes", "objects_nearby": ["box"], "attention": "down", "posture": "standing"} if inp.mode == "activity" else {})}}
+                     for t in inp.tube_ids]
             return {"cells": cells, "sheet_ms": 0}
         for _ in range(200):                                     # yield to questions (max ~20 s of waiting)
             if state["questions_waiting"] == 0:
                 break
             time.sleep(0.1)
         with state["model_lock"]:
-            res = w.describe(crops, inp.tube_ids)
+            res = w.describe(crops, inp.tube_ids, mode=inp.mode)
         state["sheets"] += 1; state["sheet_ms"].append(w.last_ms); state["sheet_ms"] = state["sheet_ms"][-50:]
         if res is None:
             return {"cells": [], "sheet_ms": w.last_ms}
         return {"cells": [{"tube_id": c.tube_id, "attributes": c.attributes.model_dump(mode="json")} for c in res.cells], "sheet_ms": w.last_ms}
+
+    def inspect_fn(question: str, entity_id: str | None = None, camera_id: str | None = None, t_ms: int | None = None) -> dict:
+        """Look at pixels for a question the lib cannot answer: the entity's keyframe nearest t (or its
+        latest), or the live frame of a camera. Slow (one VLM call); the answer cites the frame."""
+        import numpy as np
+        from PIL import Image
+        ref, img = None, None
+        if entity_id:
+            try:
+                ev = clip(engine, entity_id=entity_id)
+                refs = ev.get("keyframe_refs", [])
+                if refs:
+                    ref = refs[-1]
+                    p = keyframes_dir / ref.replace("kf://", "")
+                    if p.exists():
+                        img = np.asarray(Image.open(p).convert("RGB"))
+            except Exception:
+                pass
+        if img is None:
+            p = live_dir / "latest.jpg"
+            if p.exists():
+                img = np.asarray(Image.open(p).convert("RGB")); ref = "live frame"
+        if img is None:
+            return {"answer": "No frame is available to look at yet.", "ref": None}
+        w = writer()
+        if w == "fake":
+            return {"answer": f"(inspected {ref}) a person at a counter", "ref": ref}
+        with state["model_lock"]:
+            text = w.inspect(img, question)
+        return {"answer": text, "ref": ref, "ms": w.last_ms}
+
+    def inspect_fn_unlocked(question: str, entity_id: str | None = None, camera_id: str | None = None, t_ms: int | None = None) -> dict:
+        """inspect() for use INSIDE ask (which already holds the model lock)."""
+        import numpy as np
+        from PIL import Image
+        ref, img = None, None
+        if entity_id:
+            try:
+                refs = clip(engine, entity_id=entity_id).get("keyframe_refs", [])
+                if refs:
+                    ref = refs[-1]; p = keyframes_dir / ref.replace("kf://", "")
+                    if p.exists(): img = np.asarray(Image.open(p).convert("RGB"))
+            except Exception:
+                pass
+        if img is None and (live_dir / "latest.jpg").exists():
+            img = np.asarray(Image.open(live_dir / "latest.jpg").convert("RGB")); ref = "live frame"
+        if img is None:
+            return {"answer": "No frame is available to look at yet.", "ref": None}
+        w = writer()
+        if w == "fake":
+            return {"answer": f"(inspected {ref}) a person at a counter", "ref": ref}
+        return {"answer": w.inspect(img, question), "ref": ref, "ms": w.last_ms}
+
+    @app.post("/inspect")
+    def inspect(inp: InspectIn):
+        return inspect_fn(inp.question, inp.entity_id, inp.camera_id, inp.t_ms)
 
     def ingest_status() -> dict:
         p = state["ingest"]
@@ -191,7 +257,7 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
             state["questions_waiting"] += 1
             try:
                 with state["model_lock"]:                            # the writer yields; one model, questions first
-                    return ask_window(engine, q, backend(), now_ms, tz_name, 6, (inp.history or [])[-3:])
+                    return ask_window(engine, q, backend(), now_ms, tz_name, 6, (inp.history or [])[-3:], inspector=inspect_fn_unlocked)
             finally:
                 state["questions_waiting"] -= 1
         fut = pool.submit(_run)

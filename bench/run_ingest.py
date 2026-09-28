@@ -73,6 +73,7 @@ class Cam:
     last_annotated: np.ndarray | None = None
     sheet_times: list = field(default_factory=list)
     rejected_boxes: list = field(default_factory=list)
+    last_activity: dict = field(default_factory=dict)
 
 
 def main() -> None:
@@ -91,6 +92,7 @@ def main() -> None:
     ap.add_argument("--writer-url", default="http://127.0.0.1:8000/describe")
     ap.add_argument("--writer-min-life-s", type=float, default=2.0, help="describe a person only after this long (flickers are not worth a sheet)")
     ap.add_argument("--writer-max-per-min", type=int, default=6, help="sheets per camera per minute")
+    ap.add_argument("--activity-every-s", type=float, default=12.0, help="re-describe each confirmed person's activity this often (0 = off)")
     ap.add_argument("--zones", default=None, help="zones JSON (single camera); grid cameras get border exits + label media zones")
     ap.add_argument("--episode-min", type=float, default=10.0); ap.add_argument("--quiet-close-s", type=float, default=30.0)
     ap.add_argument("--realtime", action="store_true"); ap.add_argument("--max-minutes", type=float, default=0)
@@ -156,23 +158,23 @@ def main() -> None:
                 item = _q.get()
                 if item is None:
                     return
-                cam_id, tids, crops = item
+                cam_id, tids, crops, mode = item
                 try:
-                    payload = {"camera_id": cam_id, "tube_ids": tids, "crops_jpeg_b64": []}
+                    payload = {"camera_id": cam_id, "tube_ids": tids, "crops_jpeg_b64": [], "mode": mode}
                     for c in crops:
                         buf = io.BytesIO(); Image.fromarray(np.ascontiguousarray(c)).save(buf, format="JPEG", quality=85)
                         payload["crops_jpeg_b64"].append(base64.b64encode(buf.getvalue()).decode())
                     req = urllib.request.Request(remote, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
                     r = json.load(urllib.request.urlopen(req, timeout=120))
-                    _results.put((cam_id, r.get("cells", [])))
+                    _results.put((cam_id, r.get("cells", []), mode))
                 except Exception as e:
-                    _results.put((cam_id, {"error": str(e)[:120]}))
+                    _results.put((cam_id, {"error": str(e)[:120]}, mode))
         threading.Thread(target=_worker, daemon=True).start()
         class _Remote:
             calls = 0; last_ms = 0.0
-            def submit(self, cam_id, crops, tids):
+            def submit(self, cam_id, crops, tids, mode="appearance"):
                 try:
-                    _q.put_nowait((cam_id, list(tids), list(crops))); self.calls += 1; return True
+                    _q.put_nowait((cam_id, list(tids), list(crops), mode)); self.calls += 1; return True
                 except queue.Full:
                     return False
             def poll(self):
@@ -213,7 +215,7 @@ def main() -> None:
             return tilemap.tile_of(cid)
         return cid if spec else a.tile
     cams = {cid: Cam(camera_id=cid, tile_id=tile_for(cid)) for cid in ids}
-    site_linker = TubeLinker("site", relation=tilemap.relation) if (tilemap is not None and embedder) else None
+    site_linker = TubeLinker("person", relation=tilemap.relation) if (tilemap is not None and embedder) else None
     if tilemap is not None:
         print(f"[ingest] BuF {tilemap.kind}: tiles {tilemap.tiles}" + (f" adjacency {list(tilemap.adjacency)}" if tilemap.adjacency else ""), flush=True)
     tick_ms = int(1000 / a.fps)
@@ -256,10 +258,11 @@ def main() -> None:
         print(f"[episode] {cam.camera_id} {cam.ep} {status.value} {len(cam.ep_tubes)} tubes -> store tubes={counts['tubes']} events={counts['events']}", flush=True)
         cam.ep, cam.ep_tubes, cam.ep_cast_prev = None, [], set()
 
-    def apply_descriptions(cam: Cam, cells: list[dict]) -> None:
+    def apply_descriptions(cam: Cam, cells: list[dict], mode: str = "appearance") -> None:
         """Attach writer output to the tubes it describes (live or already closed in this episode). A
-        'not a person' verdict grades the tube low; two rejections at the same spot make a media zone."""
-        from vi.schemas import Attributes
+        'not a person' verdict grades the tube low; two rejections at the same spot make a media zone.
+        Activity results are also written as time-stamped patches: the person's activity timeline."""
+        from vi.schemas import Attributes, EnrichmentPatch
         from vi.events import Zone
         index = {tr.tube.tube_id: tr.tube for tr in cam.tracker._tracks.values()} if cam.tracker else {}
         index.update({t.tube_id: t for t in cam.ep_tubes})
@@ -273,6 +276,21 @@ def main() -> None:
                 continue
             if attrs.confidence <= 0:
                 continue
+            if mode == "activity":
+                if t.attributes is not None:                        # keep appearance, add the activity fields
+                    keep = t.attributes.model_dump()
+                    for k in ("activity", "objects_nearby", "attention", "posture"):
+                        keep[k] = getattr(attrs, k)
+                    if attrs.carried_item: keep["carried_item"] = attrs.carried_item
+                    try: attrs = Attributes(**keep)
+                    except Exception: pass
+                if cam.ep is not None:
+                    t_now = cam.last_live_ms or 0
+                    patch = EnrichmentPatch(patch_id=f"pt_{t.tube_id}_{t_now}", tube_id=t.tube_id, produced_at_ms=t_now, source="vlm:activity",
+                                            payload={"activity": attrs.activity, "objects_nearby": attrs.objects_nearby, "attention": attrs.attention,
+                                                     "posture": attrs.posture, "carried_item": attrs.carried_item, "entity_id": t.entity_id, "camera_id": cam.camera_id},
+                                            confidence=attrs.confidence)
+                    writer.write_patch(cam.ep, patch); stats["activity_patches"] += 1
             t.attributes = attrs
             if (attrs.description or "").startswith("NOT A PERSON"):
                 t.quality, t.quality_reason = "low", "writer: not a person"
@@ -343,11 +361,18 @@ def main() -> None:
                     apply_descriptions(cam, cells)
                     for t in todo: cam.described.add(t.tube_id)
                     cam.sheet_times.append(t_ms); stats["sheets"] += 1
+        # activity at cadence: every confirmed person, wider crop with context
+        if vlm is not None and a.activity_every_s and hasattr(vlm, "submit") and frames % 4 == 2:
+            due = [t for t in live if t.class_label == "person" and t.state.value == "active" and t.tube_id in cam.described
+                   and t_ms - cam.last_activity.get(t.tube_id, -10**12) >= a.activity_every_s * 1000][:6]
+            if due and vlm.submit(cam.camera_id, [crop_for_embedding(rgb, t.box, pad=0.6) for t in due], [t.tube_id for t in due], "activity"):
+                for t in due: cam.last_activity[t.tube_id] = t_ms
+                stats["activity_sheets"] += 1
         if vlm is not None and hasattr(vlm, "poll"):
-            for cam_id, cells in vlm.poll():
+            for cam_id, cells, mode in vlm.poll():
                 if isinstance(cells, dict):
                     stats["writer_errors"] += 1; continue
-                apply_descriptions(cams[cam_id], cells)
+                apply_descriptions(cams[cam_id], cells, mode)
         cam.ep_tubes += closed
         if cam.ep is not None:
             snaps = [TubeSnapshot(tube_id=t.tube_id, class_label=t.class_label, state=t.state, box=t.box,

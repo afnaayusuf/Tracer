@@ -28,6 +28,7 @@
     "source": {
       "enum": [
         "vlm",
+        "vlm:activity",
         "pose",
         "ocr",
         "siglip",

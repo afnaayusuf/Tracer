@@ -170,6 +170,10 @@ class IncrementalLoader:
                                       zone_ids=t.zone_ids, modality=t.modality.value, keyframe_refs=t.keyframe_refs,
                                       attributes=t.attributes.model_dump(mode="json") if t.attributes else None,
                                       merge_candidates=t.merge_candidates, quality=t.quality, quality_reason=t.quality_reason, embedding=t.embedding))
+            elif isinstance(rec, PatchRecord):
+                p = rec.patch
+                patch_rows.append(dict(patch_id=p.patch_id, episode_id=rec.episode_id, tube_id=p.tube_id, produced_at_ms=p.produced_at_ms, source=p.source,
+                                       payload=p.payload, confidence=p.confidence, modality=p.modality.value, enhanced=p.enhanced, failed=p.failed))
             elif isinstance(rec, EpisodeClose):
                 close = rec
         if header is None:
@@ -190,6 +194,7 @@ class IncrementalLoader:
                 conn.execute(update(episodes).where(episodes.c.episode_id == header.episode_id).values(**vals))
             counts["ticks"] = insert_ignore(conn, ticks, tick_rows)
             counts["events"] = insert_ignore(conn, events, event_rows)
+            counts["patches"] = insert_ignore(conn, patches, patch_rows)
             counts["tubes"] = insert_ignore(conn, tubes, tube_rows)
             latest: dict[str, dict] = {}
             for r in tube_rows:

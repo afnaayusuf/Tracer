@@ -274,7 +274,7 @@ def test_tile_discovery_then_tile_identity_end_to_end(tmp_path):
     assert "BuF homo: tiles {'T1': ['cam01', 'cam02', 'cam03', 'cam04']}" in out.stdout
     e2 = connect(db2); b = footage_bounds(e2)
     rows = coverage_window(e2, b[0], b[1])
-    assert len(rows) == 2 and {r["entity_id"] for r in rows} == {"site:E1", "site:E2"}  # two people, each ONE id across four cameras
+    assert len(rows) == 2 and {r["entity_id"] for r in rows} == {"person:E1", "person:E2"}  # two people, each ONE id across four cameras
     assert all(sorted(r["cameras"]) == ["cam01", "cam02", "cam03", "cam04"] for r in rows)
 
 
@@ -307,7 +307,7 @@ def test_homo_buf_gives_one_identity_from_the_start_and_adjacency_is_learned(tmp
     assert "BuF homo: tiles {'T1': ['cam01', 'cam02', 'cam03', 'cam04']}" in out.stdout
     engine = connect(db); b = footage_bounds(engine)
     rows = coverage_window(engine, b[0], b[1])
-    assert len(rows) == 1 and rows[0]["entity_id"] == "site:E1" and sorted(rows[0]["cameras"]) == ["cam01", "cam02", "cam03", "cam04"]
+    assert len(rows) == 1 and rows[0]["entity_id"] == "person:E1" and sorted(rows[0]["cameras"]) == ["cam01", "cam02", "cam03", "cam04"]
     # adjacency from sequential sightings (synthetic entities): T1 -> T2 twice, ~10 s apart
     def u(seed):
         v = np.random.default_rng(seed).normal(size=48).astype(np.float32); return (v / np.linalg.norm(v)).tolist()
@@ -326,13 +326,13 @@ def test_feed_side_merges_views_of_one_person_but_never_co_visible_ones():
         return {"entity_id": eid, "cameras": cams, "first_seen_ms": a, "last_seen_ms": b, "top_color": color, "embedding": emb,
                 "cam_intervals": {c: [(a, b)] for c in cams}}
     e1 = [1.0, 0.0]; e2 = [0.0, 1.0]                                  # dissimilar embeddings on purpose
-    rows = [row("site:E1", ["cam01"], 0, 60000, "blue", e1), row("site:E2", ["cam02"], 5000, 40000, "blue", e2),
+    rows = [row("person:E1", ["cam01"], 0, 60000, "blue", e1), row("person:E2", ["cam02"], 5000, 40000, "blue", e2),
             row("site:E3", ["cam04"], 10000, 50000, None, e2)]
     w = world_groups(rows)
     assert len(set(w.values())) == 1                                   # one man, three angles, no co-visibility -> one person
     rows2 = rows + [row("site:E4", ["cam01"], 20000, 30000, "blue", e2)]  # seen on cam01 WHILE E1 is on cam01: a second person
     w2 = world_groups(rows2)
-    assert w2["site:E4"] != w2["site:E1"] and len(set(w2.values())) == 2
+    assert w2["site:E4"] != w2["person:E1"] and len(set(w2.values())) == 2
     assert hard_evidence_people(rows) == 1 and hard_evidence_people(rows2) == 2
     rows3 = [row("cam01:E1", ["cam01"], 0, 60000, "blue", e1), row("cam02:E1", ["cam02"], 5000, 40000, "red", e1)]
     assert len(set(world_groups(rows3).values())) == 2                # no shared tile known, incompatible looks: two
@@ -350,10 +350,10 @@ def test_homo_time_overlap_beats_looks_but_sequential_still_needs_them():
         return {"entity_id": eid, "cameras": cams, "first_seen_ms": a, "last_seen_ms": b, "top_color": color, "embedding": None,
                 "cam_intervals": {c: [(a, b)] for c in cams}}
     # the man from the front (blue) and from above over white boxes (white), at the same time, different cameras
-    w = world_groups([row("site:E1", ["cam01"], 0, 60000, "blue"), row("site:E2", ["cam02"], 10000, 40000, "white")])
+    w = world_groups([row("person:E1", ["cam01"], 0, 60000, "blue"), row("person:E2", ["cam02"], 10000, 40000, "white")])
     assert len(set(w.values())) == 1
     # sequential (no overlap) with different looks: two people
-    w2 = world_groups([row("site:E1", ["cam01"], 0, 20000, "blue"), row("site:E3", ["cam02"], 30000, 50000, "red")])
+    w2 = world_groups([row("person:E1", ["cam01"], 0, 20000, "blue"), row("site:E3", ["cam02"], 30000, 50000, "red")])
     assert len(set(w2.values())) == 2
 
 

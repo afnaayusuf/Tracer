@@ -201,7 +201,7 @@ def test_relation_aware_linker_handoff_and_unambiguous_assignment():
     tm = TileMap(tiles={"T1": ["cam01", "cam02"], "T2": ["cam03"]}, adjacency={"T1|T2": {"max_gap_ms": 20_000}}, kind="hetero")
     a = unit(1); b = unit(11); b -= (b @ a) * a; b /= np.linalg.norm(b)
     topdown = a * 0.75 + b * 0.66                                   # cosine 0.75: the same man from above
-    lk = TubeLinker("site", relation=tm.relation, cross_camera_sim_thr=0.85, unambiguous_sim_thr=0.70)
+    lk = TubeLinker("person", relation=tm.relation, cross_camera_sim_thr=0.85, unambiguous_sim_thr=0.70)
     t1 = tb("cam01:0:1", "cam01", 300); lk.on_birth(t1, a, 0); t1.state = TubeState.active; lk.on_state(t1, 500)
     # same tile, the only person in it, seen from cam02 from above: unambiguous -> linked at the relaxed bar
     ev = lk.on_birth(tb("cam02:500:1", "cam02", 900, t=500), topdown, 500)
@@ -215,9 +215,9 @@ def test_relation_aware_linker_handoff_and_unambiguous_assignment():
     t2 = lk._entities[lk.entity_of("cam02:500:1")]
     t2.live_by_cam.clear(); t2.lost_at_ms = 2000
     ev = lk.on_birth(tb("cam03:10000:1", "cam03", 100, t=10000), a, 10000)
-    assert ev is not None and ev.payload["handoff"] and lk.entity_of("cam03:10000:1") == "site:E1"
+    assert ev is not None and ev.payload["handoff"] and lk.entity_of("cam03:10000:1") == "person:E1"
     # a non-adjacent tile never links, however alike
     tm2 = TileMap(tiles={"T1": ["cam01"], "T9": ["cam09"]}, kind="hetero")
-    lk2 = TubeLinker("site", relation=tm2.relation)
+    lk2 = TubeLinker("person", relation=tm2.relation)
     u = tb("cam01:0:1", "cam01", 300); lk2.on_birth(u, a, 0); u.state = TubeState.lost; lk2.on_close(u, 1000)
     assert lk2.on_birth(tb("cam09:3000:1", "cam09", 300, t=3000), a, 3000) is None and lk2.entities == 2
