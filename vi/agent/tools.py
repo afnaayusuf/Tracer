@@ -478,9 +478,9 @@ def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str =
     if acts:
         lines.append(f"ACTIVITY (sampled every ~12 s; what they did, what was within reach, where they looked): {len(acts)} entries")
         ent_world = {eid: w for eid, w in worlds.items()}
-        shown = acts if len(acts) <= 40 else acts[-40:]
-        if len(acts) > 40:
-            lines.append(f"  (showing the last 40)")
+        shown = acts if len(acts) <= 15 else acts[-15:]
+        if len(acts) > 15:
+            lines.append(f"  (showing the last 15 of {len(acts)}; the activities tool has the rest)")
         for x in shown:
             who = ent_world.get(x["entity_id"], x["entity_id"] or "?")
             bits = [x["activity"] or "—"]

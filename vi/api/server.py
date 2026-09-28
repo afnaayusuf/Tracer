@@ -426,6 +426,85 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
     def ingest_state():
         return ingest_status()
 
+    # ---------------------------------------------------------------- the lib, readable directly
+    def lib_summary(window_min: float | None = None, since_ms: int | None = None) -> dict:
+        from vi.agent.tools import activities_window, coverage_window, hard_evidence_people, load_tile_map, world_groups
+        b = footage_bounds(engine)
+        st = ingest_status()
+        if b is None:
+            return {"footage": None, "people": [], "activities": [], "events": [], "episodes": [], "ingest": st, "now_ms": None}
+        t0, t1 = b
+        ws = max(t0, t1 - int(window_min * 60_000)) if window_min else t0
+        cast = coverage_window(engine, ws, t1)
+        worlds = world_groups(cast, tile_map=load_tile_map())
+        acts = activities_window(engine, ws, t1)
+        last_act: dict[str, dict] = {}
+        for x in acts:
+            if x.get("entity_id"):
+                last_act[worlds.get(x["entity_id"], x["entity_id"])] = x
+        people = {}
+        for c in cast:
+            w = worlds[c["entity_id"]]
+            pr = people.setdefault(w, {"id": w, "first_seen_ms": c["first_seen_ms"], "last_seen_ms": c["last_seen_ms"], "cameras": set(), "tracks": [],
+                                       "looks": None, "keyframes": [], "coverage": 0.0, "quality": "ok"})
+            pr["first_seen_ms"] = min(pr["first_seen_ms"], c["first_seen_ms"]); pr["last_seen_ms"] = max(pr["last_seen_ms"], c["last_seen_ms"])
+            pr["cameras"] |= set(c["cameras"]); pr["tracks"].append(c["entity_id"]); pr["coverage"] = max(pr["coverage"], c["coverage"])
+            if c.get("looks") and not str(c["looks"]).startswith("NOT A PERSON") and (pr["looks"] is None or len(str(c["looks"])) > len(str(pr["looks"]))):
+                pr["looks"] = c["looks"]
+            if c.get("keyframe"):
+                rel = c["keyframe"].replace("kf://", "")
+                if (keyframes_dir / rel).exists() and len(pr["keyframes"]) < 4:
+                    pr["keyframes"].append(f"/keyframes/{rel}")
+        out_people = []
+        for w, pr in sorted(people.items(), key=lambda kv: kv[1]["first_seen_ms"]):
+            la = last_act.get(w)
+            out_people.append({**pr, "cameras": sorted(pr["cameras"]), "first_seen": clock(pr["first_seen_ms"]), "last_seen": clock(pr["last_seen_ms"]),
+                               "live": (t1 - pr["last_seen_ms"]) < 15_000,
+                               "last_activity": ({"t": clock(la["t_ms"]), "activity": la["activity"], "objects_nearby": la["objects_nearby"],
+                                                  "attention": la["attention"], "posture": la["posture"]} if la else None)})
+        evs = search_events(engine, t_start_ms=(since_ms or ws), t_end_ms=t1, limit=300)
+        acts_out = [{"t_ms": x["t_ms"], "t": clock(x["t_ms"]), "person": worlds.get(x["entity_id"], x["entity_id"]), "camera": x["camera_id"],
+                     "activity": x["activity"], "objects_nearby": x["objects_nearby"], "attention": x["attention"], "posture": x["posture"],
+                     "carried_item": x["carried_item"]} for x in acts if since_ms is None or x["t_ms"] > since_ms]
+        return {"footage": {"start": clock(t0), "end": clock(t1), "start_ms": t0, "end_ms": t1, "minutes": round((t1 - t0) / 60000, 1)},
+                "now_ms": t1, "window": {"start": clock(ws), "end": clock(t1)}, "people": out_people, "people_count": len(out_people),
+                "hard_evidence_min_people": hard_evidence_people(cast),
+                "activities": acts_out[-200:], "events": [{"t_ms": e["t_ms"], "t": clock(e["t_ms"]), "type": e["type"], "camera": e["camera_id"], "zone": e["zone_id"],
+                                                           "who": [worlds.get(x, x) for x in (e["subject_entity_ids"] or [])] or (e["subject_tube_ids"] or [])} for e in evs
+                                                          if since_ms is None or e["t_ms"] > since_ms][-200:],
+                "episodes": [{"id": e["episode_id"][:12], "start": clock(e["t0_ms"]), "end": clock(e["t1_ms"] or e["t0_ms"]), "status": e["status"]}
+                             for e in episodes_in(engine, t0, t1)][-30:],
+                "ingest": st}
+
+    @app.get("/lib/summary")
+    def lib_summary_ep(window_min: float | None = None, since_ms: int | None = None):
+        return lib_summary(window_min, since_ms)
+
+    @app.get("/lib/stream")
+    def lib_stream(window_min: float = 30.0, max_events: int = 0):
+        """Server-sent events: a fresh summary every 2 s while the lib changes (people, activities, events, ingest).
+        max_events > 0 bounds the stream (tests, curl)."""
+        from fastapi.responses import StreamingResponse
+        def gen():
+            last_key = None
+            sent = 0
+            while max_events <= 0 or sent < max_events:
+                sent += 1
+                try:
+                    summ = lib_summary(window_min)
+                    key = (summ.get("now_ms"), len(summ.get("activities", [])), len(summ.get("events", [])), summ.get("people_count"),
+                           (summ.get("ingest") or {}).get("frames"))
+                    if key != last_key:
+                        last_key = key
+                        yield f"data: {json.dumps(summ)}\n\n"
+                    else:
+                        yield ": keepalive\n\n"
+                except Exception as e:
+                    yield f"event: error\ndata: {json.dumps({'error': str(e)[:200]})}\n\n"
+                if max_events <= 0 or sent < max_events:
+                    time.sleep(2)
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
     @app.get("/tiles")
     def tiles():
         from vi.fusion import TileMap

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tracer — lib</title>
+<style>
+@font-face{font-family:"LINE Seed JP";font-weight:400;font-style:normal;font-display:swap;src:url(fonts/LINESeedJP-400.woff2) format("woff2")}
+@font-face{font-family:"LINE Seed JP";font-weight:700;font-style:normal;font-display:swap;src:url(fonts/LINESeedJP-700.woff2) format("woff2")}
+@font-face{font-family:"LINE Seed JP";font-weight:800;font-style:normal;font-display:swap;src:url(fonts/LINESeedJP-800.woff2) format("woff2")}
+
+:root{--ink:#111;--paper:#fff;--field:#f4f4f2;--green:#3ec46d;--mist:rgba(62,196,109,.18);--stroke:1.5px;font-family:"LINE Seed JP","LINE Seed",system-ui,sans-serif}
+body{margin:0;background:var(--paper);color:var(--ink)}
+header{display:flex;align-items:center;gap:18px;padding:16px 24px;border-bottom:var(--stroke) solid var(--ink)}
+header h1{font-size:26px;margin:0;letter-spacing:-.02em}
+header .status{font-size:13px;opacity:.75;flex:1}
+header .dot{width:10px;height:10px;border-radius:50%;background:#bbb;display:inline-block;margin-right:6px}
+header .dot.live{background:var(--green);box-shadow:0 0 0 6px var(--mist)}
+header a{color:var(--ink);font-size:13px}
+main{display:grid;grid-template-columns:minmax(320px,1.1fr) minmax(320px,1fr);gap:20px;padding:20px 24px}
+section{border:var(--stroke) solid var(--ink);border-radius:16px;padding:14px 16px;background:var(--paper)}
+section h2{font-size:14px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.08em;opacity:.7}
+#live img{width:100%;border-radius:10px;border:var(--stroke) solid var(--ink);background:var(--field)}
+.people{display:flex;flex-direction:column;gap:10px}
+.person{display:grid;grid-template-columns:72px 1fr;gap:12px;align-items:start;border:var(--stroke) solid var(--ink);border-radius:12px;padding:10px;background:var(--field)}
+.person.live{box-shadow:0 0 0 4px var(--mist)}
+.person img{width:72px;height:72px;object-fit:cover;border-radius:8px;border:var(--stroke) solid var(--ink);background:#ddd}
+.person .id{font-weight:700}
+.person .meta{font-size:12px;opacity:.75;margin-top:2px}
+.person .looks{font-size:13px;margin-top:6px}
+.person .act{font-size:13px;margin-top:6px;padding-top:6px;border-top:1px dashed rgba(0,0,0,.25)}
+.feed{max-height:360px;overflow:auto;font-size:13px;line-height:1.45}
+.feed .row{display:grid;grid-template-columns:70px 44px 1fr;gap:8px;padding:4px 0;border-bottom:1px solid rgba(0,0,0,.08)}
+.feed .t{opacity:.6;font-variant-numeric:tabular-nums}.feed .who{font-weight:700}
+.kv{display:flex;flex-wrap:wrap;gap:14px;font-size:13px}.kv b{font-weight:700}
+.empty{opacity:.55;font-size:13px}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+</style></head>
+<body>
+<header><h1>Tracer <span style="opacity:.5;font-weight:400">lib</span></h1>
+  <div class="status" id="status"><span class="dot"></span>connecting…</div>
+  <a href="index.html">ask →</a></header>
+<main>
+  <div style="display:flex;flex-direction:column;gap:20px">
+    <section id="live"><h2>Live</h2><img alt="live grid" id="liveimg"><div class="kv" id="ingest" style="margin-top:8px"></div></section>
+    <section><h2>Events</h2><div class="feed" id="events"><div class="empty">no events yet</div></div></section>
+    <section><h2>Episodes</h2><div class="feed" id="episodes"><div class="empty">—</div></div></section>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:20px">
+    <section><h2>People <span id="pcount" style="opacity:.6;font-weight:400"></span></h2><div class="people" id="people"><div class="empty">nobody yet</div></div></section>
+    <section><h2>Activity</h2><div class="feed" id="acts"><div class="empty">no activity entries yet</div></div></section>
+  </div>
+</main>
+<script>
+var API=(window.TRACER_API||'').replace(/\/$/,'');
+var WINDOW_MIN=30;
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function render(d){
+  var ing=d.ingest||{};
+  var live=!!ing.running;
+  document.getElementById('status').innerHTML='<span class="dot '+(live?'live':'')+'"></span>'+(d.footage?('footage '+d.footage.start+' → '+d.footage.end+' ('+d.footage.minutes+' min)'):'no footage yet')
+    +(live?' · ingesting':(ing.exit_code!=null?' · ingest stopped (exit '+ing.exit_code+')':' · idle'))+' · '+new Date().toLocaleTimeString();
+  document.getElementById('liveimg').src=API+'/live/latest.jpg?t='+Date.now();
+  document.getElementById('ingest').innerHTML=live?('<span><b>cameras</b> '+ing.cameras+'</span><span><b>frames</b> '+ing.frames+'</span><span><b>keep-up</b> '+(ing.footage_s&&ing.wall_s?(ing.footage_s/ing.wall_s).toFixed(2)+'×':'—')+'</span><span><b>detect</b> '+ing.detect_ms_p50+' ms</span><span><b>sheets</b> '+(ing.writer_sheets||0)+(ing.writer_ms_p50?' · '+Math.round(ing.writer_ms_p50)+' ms':'')+'</span><span><b>live tubes</b> '+ing.live_tubes+'</span>'):'';
+  var pc=document.getElementById('pcount'); pc.textContent=d.people_count?('· '+d.people_count+(d.hard_evidence_min_people!=null?' (hard evidence ≤ '+d.hard_evidence_min_people+' at once)':'')):'';
+  var ph=document.getElementById('people');
+  if(!d.people||!d.people.length){ph.innerHTML='<div class="empty">nobody yet</div>'}else{
+    ph.innerHTML=d.people.map(function(p){
+      var la=p.last_activity;
+      return '<div class="person '+(p.live?'live':'')+'">'+(p.keyframes&&p.keyframes[0]?'<img src="'+API+esc(p.keyframes[0])+'" alt="">':'<div></div>')
+        +'<div><div class="id">'+esc(p.id)+' <span style="font-weight:400;opacity:.6">'+(p.live?'live':'')+'</span></div>'
+        +'<div class="meta">'+esc(p.first_seen)+' → '+esc(p.last_seen)+' · cams '+esc(p.cameras.join(', '))+' · '+p.tracks.length+' track'+(p.tracks.length>1?'s':'')+'</div>'
+        +(p.looks?'<div class="looks">'+esc(p.looks)+'</div>':'')
+        +(la?'<div class="act"><b>'+esc(la.t)+'</b> '+esc(la.activity||'')+(la.objects_nearby&&la.objects_nearby.length?' · nearby: '+esc(la.objects_nearby.join(', ')):'')+(la.attention?' · looking '+esc(la.attention):'')+(la.posture?' · '+esc(la.posture):'')+'</div>':'')
+        +'</div></div>'}).join('')}
+  var af=document.getElementById('acts');
+  if(!d.activities||!d.activities.length){af.innerHTML='<div class="empty">no activity entries yet</div>'}else{
+    af.innerHTML=d.activities.slice(-80).map(function(x){return '<div class="row"><span class="t">'+esc(x.t)+'</span><span class="who">'+esc(x.person)+'</span><span>'+esc(x.activity||'—')+(x.objects_nearby&&x.objects_nearby.length?' · nearby: '+esc(x.objects_nearby.join(', ')):'')+(x.attention?' · looking '+esc(x.attention):'')+(x.posture?' · '+esc(x.posture):'')+(x.carried_item?' · holding '+esc(x.carried_item):'')+'</span></div>'}).join('');
+    af.scrollTop=af.scrollHeight}
+  var ef=document.getElementById('events');
+  if(!d.events||!d.events.length){ef.innerHTML='<div class="empty">no events yet</div>'}else{
+    ef.innerHTML=d.events.slice(-80).map(function(e){return '<div class="row"><span class="t">'+esc(e.t)+'</span><span class="who">'+esc(e.camera||'')+'</span><span>'+esc(e.type)+(e.zone?' · '+esc(e.zone):'')+(e.who&&e.who.length?' · '+esc(e.who.join(', ')):'')+'</span></div>'}).join('');
+    ef.scrollTop=ef.scrollHeight}
+  var ep=document.getElementById('episodes');
+  ep.innerHTML=(d.episodes&&d.episodes.length)?d.episodes.map(function(e){return '<div class="row"><span class="t">'+esc(e.start)+'</span><span class="who">'+esc(e.status)+'</span><span>'+esc(e.id)+' → '+esc(e.end)+'</span></div>'}).join(''):'<div class="empty">—</div>';
+}
+function poll(){fetch(API+'/lib/summary?window_min='+WINDOW_MIN).then(function(r){return r.json()}).then(render).catch(function(){})}
+if(window.EventSource){
+  var es=new EventSource(API+'/lib/stream?window_min='+WINDOW_MIN);
+  es.onmessage=function(ev){try{render(JSON.parse(ev.data))}catch(e){}};
+  es.onerror=function(){es.close();poll();setInterval(poll,3000)};
+}else{poll();setInterval(poll,3000)}
+</script></body></html>

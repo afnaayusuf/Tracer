@@ -233,3 +233,20 @@ def test_ask_never_returns_a_non_json_500(store_with_footage, monkeypatch):
     r = c.post("/ask", json={"question": "what is he doing right now?"})
     assert r.status_code == 200 and r.json()["grounding"] == "error" and "model exploded" in r.json()["text"]
     assert (tmp / "live" / "ask_errors.log").exists()
+
+
+def test_lib_summary_and_stream(store_with_footage):
+    from fastapi.testclient import TestClient
+    from vi.api import create_app
+    db, tmp = store_with_footage
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", keyframes_dir=str(tmp / "keyframes"), live_dir=str(tmp / "live"), load_backend=False)
+    c = TestClient(app)
+    d = c.get("/lib/summary").json()
+    assert d["footage"] and d["people_count"] >= 1 and d["people"][0]["id"].startswith("W") and "cameras" in d["people"][0]
+    assert isinstance(d["activities"], list) and isinstance(d["events"], list) and d["episodes"]
+    d2 = c.get("/lib/summary", params={"window_min": 1, "since_ms": d["now_ms"]}).json()
+    assert d2["events"] == [] and d2["activities"] == []                 # nothing newer than now
+    r = c.get("/lib/stream", params={"window_min": 5, "max_events": 1})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    assert r.text.startswith("data: ") and "people_count" in r.text
+    assert c.get("/lib.html").status_code == 200 and "Tracer" in c.get("/lib.html").text
