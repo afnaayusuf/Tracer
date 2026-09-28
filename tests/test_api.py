@@ -290,3 +290,60 @@ def test_scene_inventory_and_narration_reach_the_script_and_the_lib_page(store_w
     assert r["scene"][0]["object"] == "keyboard"
     r = c.post("/describe", json={"camera_id": "cam1", "tube_ids": [trec.tube_id], "crops_jpeg_b64": [], "mode": "narrate"}).json()
     assert r["narration"]["steps"]
+
+
+def test_frame_volume_math_and_volume_endpoint(store_with_footage):
+    import base64, io, json as _json
+    import numpy as np
+    from PIL import Image
+    from fastapi.testclient import TestClient
+    from vi.api import create_app
+    from vi.writer import annotate_ids, build_prompt, downscale, parse_volume_reply, sample_times, visual_tokens
+    assert sample_times(0, 5000, 6) == [416, 1250, 2083, 2916, 3750, 4583]      # centred samples, none on the boundary
+    assert visual_tokens(1120, 630, 6) == 2640 and visual_tokens(1920, 1080, 6) > visual_tokens(1120, 630, 6)
+    f = downscale(np.zeros((1080, 1920, 3), np.uint8), 1120); assert f.shape[1] == 1120 and f.shape[0] == 630
+    a = annotate_ids(np.zeros((200, 300, 3), np.uint8), [("W1", (20, 40, 120, 190))]); assert a[41, 21].tolist() != [0, 0, 0]  # box drawn
+    prompt = build_prompt(6, 5.0, "one person at a counter", ["W1"])
+    for word in ("cardboard", "tape", "keyboard", "jug"):
+        assert word not in prompt                                                # schema-only: no scene vocabulary
+    assert "W1" in prompt and "6 frames" in prompt
+    assert parse_volume_reply("no json") is None
+    db, tmp = store_with_footage
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", live_dir=str(tmp / "live"), load_backend=False)
+    c = TestClient(app)
+    buf = io.BytesIO(); Image.fromarray(np.zeros((90, 160, 3), np.uint8)).save(buf, format="JPEG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    r = c.post("/volume", json={"camera_id": "composite", "t0_ms": 0, "period_ms": 5000, "times_ms": [416, 1250, 2083], "frames_jpeg_b64": [b64] * 3,
+                                "ids_present": ["W1"], "previous_summary": None}).json()
+    assert r["record"]["people"][0]["id"] == "W1" and r["record"]["summary"]
+
+
+def test_volume_records_become_periods_in_the_script_and_lib(store_with_footage):
+    import json as _json
+    from fastapi.testclient import TestClient
+    from vi.agent import footage_bounds
+    from vi.agent.tools import volumes_window, window_script
+    from vi.api import create_app
+    from vi.episode import EpisodeWriter
+    from vi.schemas import EnrichmentPatch
+    from vi.store import IncrementalLoader, connect
+    db, tmp = store_with_footage
+    engine = connect(db); b = footage_bounds(engine)
+    ep_path = next((tmp / "ep").glob("*.jsonl"))
+    ep_id = next(r for r in EpisodeWriter.read(ep_path) if r.kind == "header").episode_id
+    rec = {"people": [{"id": "W1", "appearance": "dark top", "actions": ["lifts an item from a container", "turns it over", "sets it down"],
+                       "objects_handled": [{"object": "container", "state": "open"}], "attention": "down", "posture": "bending", "location": "centre"}],
+           "objects": [{"object": "container", "where": "centre", "state": "open", "count": 1, "changed": True}], "events": [{"t": "10:00:03", "who": "W1", "what": "opens a container", "kind": "handling"}],
+           "summary": "One person opens a container and examines an item.", "unclear": [], "confidence": 0.7}
+    pt = EnrichmentPatch(patch_id="vol_composite_1", tube_id="composite:volume", produced_at_ms=b[0] + 5000, source="vlm:volume",
+                         payload={"camera_id": "composite", "t0_ms": b[0], "period_ms": 5000, **rec}, confidence=0.7)
+    with ep_path.open("a") as f:
+        f.write(_json.dumps({"kind": "patch", "episode_id": ep_id, "patch": pt.model_dump(mode="json")}) + "\n")
+    IncrementalLoader(engine).flush(ep_path)
+    vols = volumes_window(engine, b[0], b[1] + 10000)
+    assert vols and vols[0]["people"][0]["actions"][0] == "lifts an item from a container"
+    script = window_script(engine, b[0], b[1] + 10000)
+    assert "PERIODS" in script and "lifts an item from a container → turns it over → sets it down" in script and "changed: container (open)" in script
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", live_dir=str(tmp / "live"), load_backend=False)
+    d = TestClient(app).get("/lib/summary").json()
+    assert d["periods"] and d["periods"][0]["summary"].startswith("One person opens")

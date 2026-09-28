@@ -34,6 +34,7 @@ TOOL_SPECS = {
     "coverage": "Per-entity seen interval and coverage fraction. args: none",
     "activities": "Activity timeline (what each person did, step by step, objects handled, objects within reach, where they looked). args: entity_id (optional), t_start_ms, t_end_ms",
     "scene": "Latest object inventory per camera view (objects, where, state, counts). args: camera_id (optional)",
+    "periods": "The generator's record per 5-second period (people's actions, objects and changes, events, summary). args: t_start_ms, t_end_ms",
     "inspect": "SLOW: look at a person's latest keyframe (or the live frame) with a specific question the script cannot answer "
                "(what exactly they hold, how they do something, where they look). args: question, entity_id (optional)",
 }
@@ -41,7 +42,7 @@ TOOL_SPECS = {
 
 class ToolStep(BaseModel):
     action: Literal["tool"] = "tool"
-    tool: Literal["search_events", "search_tubes", "search_entities", "get_script", "clip", "count_entities", "entities_present", "coverage", "activities", "scene", "inspect"]
+    tool: Literal["search_events", "search_tubes", "search_entities", "get_script", "clip", "count_entities", "entities_present", "coverage", "activities", "scene", "periods", "inspect"]
     args: dict[str, Any] = Field(default_factory=dict)
     why: str = Field("", max_length=400)
 
@@ -472,7 +473,9 @@ WINDOW_TOOLS = {"count_entities", "entities_present", "coverage"}
 SYSTEM_LIVE_SUFFIX = """
 You are answering about recorded footage. FOOTAGE: {start}–{end} ({tz}); the latest processed moment is {now}.
 The scene script below covers only the window {ws}–{we}. If the question needs a different time, say which
-window you are answering about. SCENE lists the objects in each camera view (the space's inventory: use it for "what is on the
+window you are answering about. PERIODS are the generator's records of each few-second period: what each person did (in
+order), the objects they handled and their state, what changed in the scene, events; the latest period's OBJECTS line is the
+current inventory. Use them first. SCENE lists the objects in each camera view (the space's inventory: use it for "what is on the
 desk / what objects are around"). ACTIVITY lines say what each person was doing, step by step, the objects handled and
 their state, counts, what was within reach and where they looked: use them for "what is he doing / how / with what". If the question
 needs detail the lines do not have, call inspect with the question and the W-id. W-ids (W1, W2…) are people; a person seen on several cameras has one W-id and several
@@ -512,6 +515,8 @@ def _window_tool(engine: Engine, step: ToolStep, ws: int, we: int, camera_id: st
         return T.entities_present_window(engine, a, b, float(args.get("min_coverage", 0.9)), camera_id=camera_id)
     if step.tool == "coverage":
         return T.coverage_window(engine, a, b, camera_id=camera_id)
+    if step.tool == "periods":
+        return T.volumes_window(engine, a, b, camera_id)
     if step.tool == "scene":
         return T.scene_inventory(engine, we, args.get("camera_id") or camera_id)
     if step.tool == "activities":

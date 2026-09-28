@@ -76,6 +76,9 @@ class Cam:
     last_activity: dict = field(default_factory=dict)
     last_scene_ms: int = -10**12
     scene_energy_at_last: float = 0.0
+    vol_frames: list = field(default_factory=list)      # (t_ms, annotated frame) collected during the current period
+    vol_t0: int | None = None
+    vol_prev_summary: str | None = None
     frame_ring: dict = field(default_factory=dict)      # tube_id -> [(t_ms, wide crop), ...] for narration
     last_narrate: dict = field(default_factory=dict)
 
@@ -96,9 +99,12 @@ def main() -> None:
     ap.add_argument("--writer-url", default="http://127.0.0.1:8000/describe")
     ap.add_argument("--writer-min-life-s", type=float, default=2.0, help="describe a person only after this long (flickers are not worth a sheet)")
     ap.add_argument("--writer-max-per-min", type=int, default=6, help="sheets per camera per minute")
-    ap.add_argument("--activity-every-s", type=float, default=12.0, help="re-describe each confirmed person's activity this often (0 = off)")
-    ap.add_argument("--scene-every-s", type=float, default=60.0, help="full-frame object inventory per camera this often, and on a scene change (0 = off)")
-    ap.add_argument("--narrate-every-s", type=float, default=30.0, help="multi-frame step-by-step narration per active person this often (0 = off)")
+    ap.add_argument("--activity-every-s", type=float, default=0.0, help="legacy activity pass (0 = off; the volume covers it)")
+    ap.add_argument("--volume-s", type=float, default=5.0, help="frame-volume period for the generator (0 = off; default on)")
+    ap.add_argument("--volume-frames", type=int, default=6, help="frames sampled per volume")
+    ap.add_argument("--volume-max-w", type=int, default=1120, help="downscale volume frames to this width (token budget)")
+    ap.add_argument("--scene-every-s", type=float, default=0.0, help="legacy full-frame inventory pass (0 = off; the volume covers it)")
+    ap.add_argument("--narrate-every-s", type=float, default=0.0, help="legacy narration pass (0 = off; the volume covers it)")
     ap.add_argument("--zones", default=None, help="zones JSON (single camera); grid cameras get border exits + label media zones")
     ap.add_argument("--episode-min", type=float, default=10.0); ap.add_argument("--quiet-close-s", type=float, default=30.0)
     ap.add_argument("--realtime", action="store_true"); ap.add_argument("--max-minutes", type=float, default=0)
@@ -166,6 +172,17 @@ def main() -> None:
                     return
                 cam_id, tids, crops, mode = item
                 try:
+                    if mode == "volume":
+                        meta = tids                                    # dict carried in the tids slot
+                        payload = {"camera_id": cam_id, "t0_ms": meta["t0_ms"], "period_ms": meta["period_ms"], "times_ms": meta["times_ms"],
+                                   "ids_present": meta["ids_present"], "previous_summary": meta.get("previous_summary"), "frames_jpeg_b64": []}
+                        for c in crops:
+                            buf = io.BytesIO(); Image.fromarray(np.ascontiguousarray(c)).save(buf, format="JPEG", quality=80)
+                            payload["frames_jpeg_b64"].append(base64.b64encode(buf.getvalue()).decode())
+                        req = urllib.request.Request(remote.rsplit("/", 1)[0] + "/volume", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+                        r = json.load(urllib.request.urlopen(req, timeout=240))
+                        r["meta"] = meta
+                        _results.put((cam_id, r, "volume")); continue
                     payload = {"camera_id": cam_id, "tube_ids": tids, "crops_jpeg_b64": [], "mode": mode}
                     for c in crops:
                         buf = io.BytesIO(); Image.fromarray(np.ascontiguousarray(c)).save(buf, format="JPEG", quality=85)
@@ -185,8 +202,10 @@ def main() -> None:
             def submit(self, cam_id, crops, tids, mode="appearance"):
                 if mode in ("scene", "narrate") and _q.qsize() >= 24:
                     return False                                          # people first; inventory/narration can wait
+                if mode == "volume" and _q.qsize() >= 4:
+                    return False                                          # never queue volumes: a stale volume is worthless
                 try:
-                    _q.put_nowait((cam_id, list(tids), list(crops), mode)); self.calls += 1; return True
+                    _q.put_nowait((cam_id, tids if isinstance(tids, dict) else list(tids), list(crops), mode)); self.calls += 1; return True
                 except queue.Full:
                     return False
             def poll(self):
@@ -271,6 +290,31 @@ def main() -> None:
         stats["episodes"] += 1
         print(f"[episode] {cam.camera_id} {cam.ep} {status.value} {len(cam.ep_tubes)} tubes -> store tubes={counts['tubes']} events={counts['events']}", flush=True)
         cam.ep, cam.ep_tubes, cam.ep_cast_prev = None, [], set()
+
+    def apply_volume(cam: Cam, r: dict) -> None:
+        """One volume record -> one patch (source vlm:volume) in the open episode; people's actions also as activity patches."""
+        from vi.schemas import EnrichmentPatch
+        rec = r.get("record"); meta = r.get("meta") or {}
+        if not rec or cam.ep is None:
+            return
+        t_end = int(meta.get("t0_ms", 0)) + int(meta.get("period_ms", 0))
+        cam.vol_prev_summary = rec.get("summary")
+        patch = EnrichmentPatch(patch_id=f"vol_{cam.camera_id}_{meta.get('t0_ms')}", tube_id=f"{cam.camera_id}:volume", produced_at_ms=t_end, source="vlm:volume",
+                                payload={"camera_id": cam.camera_id, "t0_ms": meta.get("t0_ms"), "period_ms": meta.get("period_ms"), **rec,
+                                         "video_input": r.get("video_input"), "ms": r.get("ms")}, confidence=float(rec.get("confidence", 0.6)))
+        writer.write_patch(cam.ep, patch); stats["volumes"] += 1
+        for pdesc in rec.get("people", []):
+            eid = pdesc.get("id")
+            if not eid or eid == "unlabeled":
+                continue
+            ap = EnrichmentPatch(patch_id=f"va_{eid}_{meta.get('t0_ms')}", tube_id=f"{cam.camera_id}:volume", produced_at_ms=t_end, source="vlm:activity",
+                                 payload={"activity": "; ".join(pdesc.get("actions") or []) or None, "steps": pdesc.get("actions") or [],
+                                          "objects_handled": pdesc.get("objects_handled") or [], "attention": pdesc.get("attention"), "posture": pdesc.get("posture"),
+                                          "entity_id": eid, "camera_id": cam.camera_id, "kind": "volume"}, confidence=float(rec.get("confidence", 0.6)))
+            writer.write_patch(cam.ep, ap)
+        print(f"[volume] {cam.camera_id} {datetime.fromtimestamp(t_end / 1000, timezone.utc).strftime('%H:%M:%S')}Z ({r.get('ms', 0) / 1000:.1f}s, video={r.get('video_input')}): {rec.get('summary')}"
+              + "".join(f"\n          {p['id']}: " + " → ".join(p.get('actions') or []) for p in rec.get("people", [])[:3])
+              + (f"\n          objects changed: " + ", ".join(o['object'] for o in rec.get('objects', []) if o.get('changed')) if any(o.get('changed') for o in rec.get('objects', [])) else ""), flush=True)
 
     def apply_scene(cam: Cam, r: dict) -> None:
         from vi.schemas import EnrichmentPatch
@@ -429,17 +473,7 @@ def main() -> None:
                             cam.last_narrate[t.tube_id] = t_ms; stats["narrate_sheets"] += 1
             for tid in [k for k in cam.frame_ring if k not in {t.tube_id for t in live}]:
                 cam.frame_ring.pop(tid, None)
-        if vlm is not None and hasattr(vlm, "poll"):
-            for cam_id, payload, mode in vlm.poll():
-                if isinstance(payload, dict) and "error" in payload:
-                    stats["writer_errors"] += 1; continue
-                if mode == "scene":
-                    apply_scene(cams[cam_id], payload)
-                elif mode == "narrate":
-                    tid = (payload.get("tube_ids") or [None])[0] if isinstance(payload, dict) else None
-                    apply_narration(cams[cam_id], payload, tid or "")
-                else:
-                    apply_descriptions(cams[cam_id], payload, mode)
+
         cam.ep_tubes += closed
         if cam.ep is not None:
             snaps = [TubeSnapshot(tube_id=t.tube_id, class_label=t.class_label, state=t.state, box=t.box,
@@ -507,6 +541,68 @@ def main() -> None:
             h, w = cell.shape[:2]
             dets = remap_detections(list(dets), full_frame_roi(w, h), w, h)
             step_cam(cams[cid], cell, gray, fr.pts_ms, t_ms, dets)
+        # frame volumes: the generator's unit. Homo BuF -> one composite volume for the whole space; otherwise one per camera.
+        if vlm is not None and a.volume_s and hasattr(vlm, "submit"):
+            from vi.writer import annotate_ids, downscale, sample_times
+            def world_label(t):
+                return (t.entity_id or t.tube_id).split(":")[-1] if t.entity_id else t.tube_id.split(":")[-1]
+            vol_cams = []
+            if tilemap is not None and tilemap.kind == "homo":
+                if "composite" not in cams:
+                    cams["composite"] = Cam(camera_id="composite", tile_id="T1"); cams["composite"].w, cams["composite"].h = fr.rgb.shape[1], fr.rgb.shape[0]
+                vc = cams["composite"]
+                # ids drawn per cell, then recomposed
+                panels = []
+                for cid, cell in zip(ids, cells):
+                    boxes = [(world_label(tr.tube), (tr.tube.box.x1, tr.tube.box.y1, tr.tube.box.x2, tr.tube.box.y2)) for tr in cams[cid].tracker._tracks.values()
+                             if tr.tube.class_label == "person" and tr.tube.state.value == "active"] if cams[cid].tracker else []
+                    panels.append(annotate_ids(cell, boxes))
+                vc.current["frame"] = compose(panels, spec) if spec else panels[0]
+                vc.ep = next((cams[c].ep for c in ids if cams[c].ep), None); vc.last_live_ms = t_ms
+                vol_cams = [vc]
+            else:
+                for cid in ids:
+                    c = cams[cid]
+                    boxes = [(world_label(tr.tube), (tr.tube.box.x1, tr.tube.box.y1, tr.tube.box.x2, tr.tube.box.y2)) for tr in c.tracker._tracks.values()
+                             if tr.tube.class_label == "person" and tr.tube.state.value == "active"] if c.tracker else []
+                    c.current["vol_frame"] = annotate_ids(c.current["frame"], boxes) if c.current["frame"] is not None else None
+                    vol_cams.append(c)
+            for vc in vol_cams:
+                frame_now = vc.current.get("vol_frame") if vc.camera_id != "composite" else vc.current["frame"]
+                if frame_now is None:
+                    continue
+                if vc.vol_t0 is None:
+                    vc.vol_t0 = t_ms
+                period_ms = int(a.volume_s * 1000)
+                want = sample_times(vc.vol_t0, period_ms, a.volume_frames)
+                k = len(vc.vol_frames)
+                if k < a.volume_frames and t_ms >= want[k]:
+                    vc.vol_frames.append((t_ms, downscale(frame_now, a.volume_max_w)))
+                if t_ms - vc.vol_t0 >= period_ms:
+                    if len(vc.vol_frames) >= 2:
+                        ids_present = sorted({world_label(tr.tube) for cid in ids for tr in (cams[cid].tracker._tracks.values() if cams[cid].tracker else [])
+                                              if tr.tube.class_label == "person" and tr.tube.state.value == "active"}) if vc.camera_id == "composite" else \
+                                      sorted({world_label(tr.tube) for tr in vc.tracker._tracks.values() if tr.tube.class_label == "person" and tr.tube.state.value == "active"} if vc.tracker else set())
+                        meta = {"t0_ms": vc.vol_t0, "period_ms": period_ms, "times_ms": [t for t, _ in vc.vol_frames], "ids_present": ids_present,
+                                "previous_summary": vc.vol_prev_summary}
+                        if vlm.submit(vc.camera_id, [f for _, f in vc.vol_frames], meta, "volume"):
+                            stats["volume_sheets"] += 1
+                        else:
+                            stats["volume_dropped"] += 1
+                    vc.vol_frames, vc.vol_t0 = [], None
+        if vlm is not None and hasattr(vlm, "poll"):
+            for cam_id, payload, mode in vlm.poll():
+                if isinstance(payload, dict) and "error" in payload and "record" not in payload:
+                    stats["writer_errors"] += 1; continue
+                if mode == "volume":
+                    apply_volume(cams[cam_id], payload); continue
+                if mode == "scene":
+                    apply_scene(cams[cam_id], payload)
+                elif mode == "narrate":
+                    tid = (payload.get("tube_ids") or [None])[0] if isinstance(payload, dict) else None
+                    apply_narration(cams[cam_id], payload, tid or "")
+                else:
+                    apply_descriptions(cams[cam_id], payload, mode)
         if a.live_every and frames % a.live_every == 0:
             live_dir = Path(a.live_dir); live_dir.mkdir(parents=True, exist_ok=True)
             from PIL import Image

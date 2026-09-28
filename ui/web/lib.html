@@ -46,6 +46,7 @@ section h2{font-size:14px;margin:0 0 10px;text-transform:uppercase;letter-spacin
   </div>
   <div style="display:flex;flex-direction:column;gap:20px">
     <section><h2>People <span id="pcount" style="opacity:.6;font-weight:400"></span></h2><div class="people" id="people"><div class="empty">nobody yet</div></div></section>
+    <section><h2>Periods <span style="opacity:.6;font-weight:400">the generator, every few seconds</span></h2><div class="feed" id="periods"><div class="empty">no periods yet</div></div></section>
     <section><h2>Activity</h2><div class="feed" id="acts"><div class="empty">no activity entries yet</div></div></section>
   </div>
 </main>
@@ -72,6 +73,13 @@ function render(d){
         +(p.looks?'<div class="looks">'+esc(p.looks)+'</div>':'')
         +(la?'<div class="act"><b>'+esc(la.t)+'</b> '+esc(la.activity||'')+(la.objects_nearby&&la.objects_nearby.length?' · nearby: '+esc(la.objects_nearby.join(', ')):'')+(la.attention?' · looking '+esc(la.attention):'')+(la.posture?' · '+esc(la.posture):'')+'</div>':'')
         +'</div></div>'}).join('')}
+  var pf=document.getElementById('periods');
+  if(!d.periods||!d.periods.length){pf.innerHTML='<div class="empty">no periods yet</div>'}else{
+    pf.innerHTML=d.periods.slice(-40).map(function(v){return '<div class="row"><span class="t">'+esc(v.t0)+'–'+esc(v.t1.slice(-5))+'</span><span class="who">'+(v.people||[]).map(function(p){return esc(p.id)}).join(',')+'</span><span>'+esc(v.summary||'—')
+      +(v.people||[]).map(function(p){return '<br><span style="opacity:.85"><b>'+esc(p.id)+'</b>'+(p.appearance?' ('+esc(p.appearance)+')':'')+': '+(p.actions||[]).map(esc).join(' → ')+(p.objects_handled&&p.objects_handled.length?' · handled: '+p.objects_handled.map(function(o){return esc(o.object)+(o.state?' ('+esc(o.state)+')':'')}).join(', '):'')+'</span>'}).join('')
+      +(v.changed&&v.changed.length?'<br><span style="opacity:.7">changed: '+v.changed.map(function(o){return esc(o.object)+(o.state?' ('+esc(o.state)+')':'')}).join(', ')+'</span>':'')
+      +(v.events||[]).map(function(e){return '<br><span style="opacity:.7">event '+esc(e.t||'')+' '+esc(e.who||'')+': '+esc(e.what)+'</span>'}).join('')+'</span></div>'}).join('');
+    pf.scrollTop=pf.scrollHeight}
   var af=document.getElementById('acts');
   if(!d.activities||!d.activities.length){af.innerHTML='<div class="empty">no activity entries yet</div>'}else{
     af.innerHTML=d.activities.slice(-80).map(function(x){return '<div class="row"><span class="t">'+esc(x.t)+'</span><span class="who">'+esc(x.person)+'</span><span>'+esc(x.activity||'—')+(x.steps&&x.steps.length?'<br><span style="opacity:.8">'+x.steps.map(esc).join(' → ')+'</span>':'')+(x.objects_handled&&x.objects_handled.length?' · handled: '+x.objects_handled.map(function(o){return esc(o.object)+(o.state?' ('+esc(o.state)+')':'')}).join(', '):'')+(x.objects_nearby&&x.objects_nearby.length?' · nearby: '+esc(x.objects_nearby.join(', ')):'')+(x.attention?' · looking '+esc(x.attention):'')+(x.posture?' · '+esc(x.posture):'')+(x.carried_item?' · holding '+esc(x.carried_item):'')+'</span></div>'}).join('');

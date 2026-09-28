@@ -40,7 +40,7 @@ class _Entity:
 
 
 class TubeLinker:
-    def __init__(self, camera_id: str, sim_thr: float = 0.88, max_gap_ms: int = 30_000,
+    def __init__(self, camera_id: str, sim_thr: float = 0.88, max_gap_ms: int = 2 * 3600_000,
                  max_jump_px: float = 400.0, ema_alpha: float = 0.3, exemplars: int = 5,
                  exited_sim_thr: float = 0.90, near_sim_thr: float = 0.85, near_gap_ms: int = 5000,
                  near_jump_px: float = 200.0, aux_thr: float = 0.80, cross_camera_sim_thr: float = 0.85,
@@ -117,6 +117,9 @@ class TubeLinker:
     def _thr(self, ent: _Entity, tube: Tube, t_ms: int) -> float:
         if ent.cameras and tube.camera_id not in ent.cameras:
             return self.cross_camera_sim_thr                  # a different view of the same person: appearance only
+        gap = t_ms - (ent.lost_at_ms or t_ms)
+        if gap > 60_000:
+            return max(self.sim_thr, 0.90)                    # a long absence: appearance alone, at a strict bar (one employee, back from the stockroom)
         if ent.closed_as_exit:
             return self.exited_sim_thr
         cx, cy = _center(tube)

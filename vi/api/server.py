@@ -42,6 +42,16 @@ class DescribeIn(BaseModel):
     mode: str = "appearance"               # appearance | activity | scene (one full frame -> inventory) | narrate (frames of one person -> steps)
 
 
+class VolumeIn(BaseModel):
+    camera_id: str                          # camera or tile id (composite view)
+    t0_ms: int
+    period_ms: int
+    times_ms: list[int]
+    frames_jpeg_b64: list[str]              # annotated frames, time order
+    ids_present: list[str] = []
+    previous_summary: str | None = None
+
+
 class InspectIn(BaseModel):
     question: str
     entity_id: str | None = None
@@ -64,6 +74,7 @@ class IngestIn(BaseModel):
     tiles: str = "auto"              # "one" = homo BuF (all cameras one space); "auto" = learned map if present; "none" = per camera
     auto_tiles_after_min: float = 5  # with tiles="auto" and no map yet: learn the map after this much footage and restart seamlessly
     skip_s: float = 0
+    volume_s: float = 8.0            # frame-volume period for the generator (5 on vLLM; 8-10 on the transformers path)
 
 
 def create_app(db_url: str | None = None, backend_name: str | None = None, model: str | None = None,
@@ -215,6 +226,31 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
             import traceback
             print(f"[inspect] error: {type(e).__name__}: {e}\n{traceback.format_exc()}", flush=True)
             return {"answer": f"inspect failed ({type(e).__name__}: {str(e)[:120]}); answer from the script instead.", "ref": None}
+
+    @app.post("/volume")
+    def volume(inp: VolumeIn):
+        """The generator's call: one frame-volume in, one structured record out. Questions take priority."""
+        import base64, io
+        import numpy as np
+        from PIL import Image
+        from vi.writer import FrameVolume, build_prompt
+        frames = [np.asarray(Image.open(io.BytesIO(base64.b64decode(b))).convert("RGB")) for b in inp.frames_jpeg_b64]
+        vol = FrameVolume(camera_id=inp.camera_id, t0_ms=inp.t0_ms, period_ms=inp.period_ms, frames=frames, times_ms=inp.times_ms, ids_present=inp.ids_present)
+        prompt = build_prompt(len(frames), inp.period_ms / 1000, inp.previous_summary, inp.ids_present)
+        w = writer()
+        if w == "fake":
+            return {"record": {"people": [{"id": (inp.ids_present or ["unlabeled"])[0], "appearance": "person", "actions": ["moves through the view"],
+                                           "objects_handled": [], "attention": None, "posture": "walking", "location": "centre"}],
+                               "objects": [{"object": "counter", "where": "centre", "state": None, "count": None, "changed": False}],
+                               "events": [], "summary": "One person moves through the view.", "unclear": [], "confidence": 0.6}, "ms": 0, "video_input": False}
+        for _ in range(200):
+            if state["questions_waiting"] == 0:
+                break
+            time.sleep(0.1)
+        with state["model_lock"]:
+            rec = w.volume(vol, prompt, tz_name)
+        state["sheets"] += 1; state["sheet_ms"].append(w.last_ms); state["sheet_ms"] = state["sheet_ms"][-50:]
+        return {"record": rec, "ms": w.last_ms, "video_input": getattr(w, "video_ok", None), "error": getattr(w, "last_error", None) if rec is None else None}
 
     @app.post("/inspect")
     def inspect(inp: InspectIn):
@@ -370,7 +406,7 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         cmd = [sys.executable, "bench/run_ingest.py", "--source", inp.source, "--db", db_url, "--profile", inp.profile, "--reid", inp.reid,
                "--writer", writer_mode, "--writer-url", f"http://127.0.0.1:{os.environ.get('PORT', '8000')}/describe",
                "--model", inp.model, "--fps", str(inp.fps), "--episode-min", str(inp.episode_min), "--live-dir", str(live_dir),
-               "--tiles", inp.tiles]
+               "--tiles", inp.tiles, "--volume-s", str(inp.volume_s)]
         if inp.skip_s:
             cmd += ["--skip-s", str(inp.skip_s)]
         if inp.start_time:
@@ -450,7 +486,7 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
 
     # ---------------------------------------------------------------- the lib, readable directly
     def lib_summary(window_min: float | None = None, since_ms: int | None = None) -> dict:
-        from vi.agent.tools import activities_window, coverage_window, hard_evidence_people, load_tile_map, scene_inventory, world_groups
+        from vi.agent.tools import activities_window, coverage_window, hard_evidence_people, load_tile_map, scene_inventory, volumes_window, world_groups
         b = footage_bounds(engine)
         st = ingest_status()
         if b is None:
@@ -490,10 +526,16 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
                      "carried_item": x["carried_item"], "kind": x.get("kind"), "steps": x.get("steps") or [], "objects_handled": x.get("objects_handled") or [],
                      "counts": x.get("counts") or {}} for x in acts if since_ms is None or x["t_ms"] > since_ms]
         scene = {cam: {"t": clock(d["t_ms"]), "objects": d["objects"]} for cam, d in scene_inventory(engine, t1).items()}
+        vols = volumes_window(engine, ws, t1)
+        if vols and vols[-1]["objects"]:
+            scene[vols[-1]["camera_id"] or "composite"] = {"t": clock(vols[-1]["t_end_ms"]), "objects": vols[-1]["objects"]}
+        periods = [{"t0": clock(v["t0_ms"] or v["t_end_ms"]), "t1": clock(v["t_end_ms"]), "t_end_ms": v["t_end_ms"], "summary": v["summary"], "people": v["people"],
+                    "changed": [o for o in v["objects"] if o.get("changed")], "events": v["events"], "confidence": v["confidence"]}
+                   for v in vols if since_ms is None or v["t_end_ms"] > since_ms][-60:]
         return {"footage": {"start": clock(t0), "end": clock(t1), "start_ms": t0, "end_ms": t1, "minutes": round((t1 - t0) / 60000, 1)},
                 "now_ms": t1, "window": {"start": clock(ws), "end": clock(t1)}, "people": out_people, "people_count": len(out_people),
                 "hard_evidence_min_people": hard_evidence_people(cast),
-                "activities": acts_out[-200:], "scene": scene, "events": [{"t_ms": e["t_ms"], "t": clock(e["t_ms"]), "type": e["type"], "camera": e["camera_id"], "zone": e["zone_id"],
+                "activities": acts_out[-200:], "scene": scene, "periods": periods, "events": [{"t_ms": e["t_ms"], "t": clock(e["t_ms"]), "type": e["type"], "camera": e["camera_id"], "zone": e["zone_id"],
                                                            "who": [worlds.get(x, x) for x in (e["subject_entity_ids"] or [])] or (e["subject_tube_ids"] or [])} for e in evs
                                                           if since_ms is None or e["t_ms"] > since_ms][-200:],
                 "episodes": [{"id": e["episode_id"][:12], "start": clock(e["t0_ms"]), "end": clock(e["t1_ms"] or e["t0_ms"]), "status": e["status"]}

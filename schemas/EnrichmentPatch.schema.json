@@ -30,6 +30,7 @@
         "vlm",
         "vlm:activity",
         "vlm:scene",
+        "vlm:volume",
         "pose",
         "ocr",
         "siglip",

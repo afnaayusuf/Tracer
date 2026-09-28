@@ -33,9 +33,9 @@ ACTIVITY_PROMPT = (
     "This image is a grid of cells; each cell shows one person with their surroundings, cropped from a camera, with the "
     "cell number in the yellow strip under it (a label, not part of the scene). For EVERY cell describe what that person is "
     "doing RIGHT NOW. Reply with a JSON array, one object per cell, no prose:\n"
-    '[{"cell_id": 0, "is_person": true or false, "activity": what they are doing, <= 10 words (e.g. "packing items into a cardboard box"), '
-    '"objects_nearby": up to 6 nouns within their reach (e.g. ["cardboard box","tape roll","paper"]), '
-    '"attention": where they are looking, <= 8 words (e.g. "down at the box"), "posture": one of standing/sitting/bending/walking/lying/reaching, '
+    '[{"cell_id": 0, "is_person": true or false, "activity": "<what they are doing, <= 10 words>", '
+    '"objects_nearby": ["<up to 6 noun phrases within their reach>"], '
+    '"attention": "<where they are looking, <= 8 words>", "posture": "<one of standing/sitting/bending/walking/lying/reaching>", '
     '"carried_item": short text or null, "confidence": 0-1}]\n'
     "Describe only what is visible; do not guess intentions."
 )
@@ -260,6 +260,32 @@ class WriterVLM:
         """The same person over time: step-by-step narration with the objects handled."""
         sheet = pack_sheet(frames, cell=256, cols=3)
         return parse_narration_reply(self._generate(sheet, NARRATE_PROMPT, 500))
+
+    def volume(self, vol, prompt: str, tz_name: str = "UTC", max_new_tokens: int = 700) -> dict | None:
+        """One call per frame-volume. Video input if the processor takes it; a labelled time grid otherwise."""
+        from .volume import grid_fallback, parse_volume_reply, volume_to_messages
+        t0 = time.perf_counter()
+        text = None
+        try:
+            messages, _ = volume_to_messages(vol, prompt, tz_name)
+            try:
+                inputs = self.proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt", enable_thinking=False)
+            except TypeError:
+                inputs = self.proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt")
+            inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+            with self.torch.no_grad():
+                out = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+            gen = out[0][inputs["input_ids"].shape[1]:]
+            tok = getattr(self.proc, "tokenizer", self.proc)
+            text = tok.decode(gen, skip_special_tokens=True)
+            self.video_ok = True
+        except Exception as e:                                   # processor without video support: labelled grid
+            self.video_ok = False
+            self.last_error = f"{type(e).__name__}: {str(e)[:120]}"
+            text = self._generate(grid_fallback(vol, tz_name), prompt + "\n(The frames are laid out as a grid with their times under each cell.)", max_new_tokens)
+        self.calls += 1
+        self.last_ms = (time.perf_counter() - t0) * 1000
+        return parse_volume_reply(text or "")
 
     def describe(self, crops: list[np.ndarray], tube_ids: list[str], modality: Modality = Modality.rgb, mode: str = "appearance") -> ContactSheetResult | None:
         sheet = pack_sheet(crops)

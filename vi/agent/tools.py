@@ -340,6 +340,12 @@ def world_groups(rows: list[dict], sim_thr: float = 0.85, max_gap_ms: int = 60_0
                 continue                                             # rule 1: never a proposal
             gap = max(a["first_seen_ms"], b["first_seen_ms"]) - min(a["last_seen_ms"], b["last_seen_ms"])
             if gap > max_gap_ms:
+                # a long absence in a shared tile: appearance decides, at a strict bar (the same employee an hour later)
+                ea, eb = embs[a["entity_id"]], embs[b["entity_id"]]
+                if same_tile(a, b) and looks_compatible(a, b) and ea is not None and eb is not None and ea.shape == eb.shape:
+                    sim = float(ea @ eb) / (float(np.linalg.norm(ea)) * float(np.linalg.norm(eb)) + 1e-8)
+                    if sim >= 0.90:
+                        proposals.append((sim, a["entity_id"], b["entity_id"]))
                 continue
             if same_tile(a, b):
                 overlapping = gap <= -3000                            # present at the same time for >= 3 s
@@ -458,6 +464,23 @@ def scene_inventory(engine: Engine, t_end_ms: int, camera_id: str | None = None)
     return dict(sorted(out.items()))
 
 
+def volumes_window(engine: Engine, t_start_ms: int, t_end_ms: int, camera_id: str | None = None, limit: int = 400) -> list[dict]:
+    """The generator's records: one per frame-volume (period), with people/actions, objects, events, summary."""
+    with engine.connect() as conn:
+        rows = [dict(r._mapping) for r in conn.execute(select(patches).where(and_(patches.c.source == "vlm:volume",
+                                                                                   patches.c.produced_at_ms >= t_start_ms, patches.c.produced_at_ms <= t_end_ms + 1))
+                                                       .order_by(patches.c.produced_at_ms).limit(limit))]
+    out = []
+    for r in rows:
+        p = r["payload"] or {}
+        if camera_id and p.get("camera_id") not in (camera_id, "composite"):
+            continue
+        out.append({"t_end_ms": r["produced_at_ms"], "t0_ms": p.get("t0_ms"), "camera_id": p.get("camera_id"), "summary": p.get("summary"),
+                    "people": p.get("people") or [], "objects": p.get("objects") or [], "events": p.get("events") or [], "unclear": p.get("unclear") or [],
+                    "confidence": r["confidence"]})
+    return out
+
+
 def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str = "UTC", max_chars: int = 7000,
                   max_events: int = 120, camera_id: str | None = None) -> str:
     """Compact script for a time window across episodes: absolute clock times, confirmed cast with
@@ -490,6 +513,28 @@ def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str =
         lines.append(f"  {w}  person  seen {clock(first)}–{clock(last)}  on {','.join(cams)}" + (f"  looks: {looks}" if looks else ""))
         lines.append("      tracks: " + "; ".join(f"{m['entity_id']} ({','.join(m['cameras'])} {clock(m['first_seen_ms'])}–{clock(m['last_seen_ms'])})" for m in members)
                      + (f"  keyframe {members[0]['keyframe']}" if members[0].get("keyframe") else ""))
+    vols = volumes_window(engine, t_start_ms, t_end_ms, camera_id)
+    if vols:
+        lines.append(f"PERIODS (the generator's record of each {int((vols[-1]['t_end_ms'] - (vols[-1]['t0_ms'] or vols[-1]['t_end_ms'])) / 1000) or 5}-second period; "
+                     f"{len(vols)} in this window" + (", showing the last 12" if len(vols) > 12 else "") + "):")
+        for v in vols[-12:]:
+            t0 = v["t0_ms"] or v["t_end_ms"]
+            lines.append(f"  {clock(t0)}–{clock(v['t_end_ms'])}  {v['summary'] or '—'}")
+            for pp in v["people"][:4]:
+                bits = []
+                if pp.get("actions"): bits.append(" → ".join(pp["actions"]))
+                if pp.get("objects_handled"): bits.append("handled: " + ", ".join(f"{o['object']}" + (f" ({o['state']})" if o.get("state") else "") for o in pp["objects_handled"]))
+                if pp.get("attention"): bits.append("looking " + pp["attention"])
+                lines.append(f"      {pp['id']}" + (f" ({pp['appearance']})" if pp.get("appearance") else "") + ": " + "; ".join(bits))
+            changed = [o for o in v["objects"] if o.get("changed")]
+            if changed:
+                lines.append("      changed: " + "; ".join(f"{o['object']}" + (f" ({o['state']})" if o.get("state") else "") + (f" [{o['where']}]" if o.get("where") else "") for o in changed[:8]))
+            for e in v["events"][:4]:
+                lines.append(f"      event {e.get('t') or ''} {e.get('who') or ''}: {e['what']}")
+        latest = vols[-1]
+        if latest["objects"]:
+            lines.append("  OBJECTS in view at the latest period: " + "; ".join(f"{o['object']}" + (f" x{o['count']}" if o.get("count") else "") + (f" ({o['state']})" if o.get("state") else "")
+                                                                             + (f" [{o['where']}]" if o.get("where") else "") for o in latest["objects"][:20]))
     inv = scene_inventory(engine, t_end_ms, camera_id)
     if inv:
         lines.append("SCENE (objects in each camera view, latest inventory):")
