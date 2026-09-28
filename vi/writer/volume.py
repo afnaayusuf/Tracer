@@ -147,3 +147,64 @@ def grid_fallback(vol: FrameVolume, tz_name: str = "UTC"):
         dr.rectangle([x, y + ch, x + cw - 1, y + ch + cap - 1], fill=(255, 215, 0))
         dr.text((x + 6, y + ch + 3), f"#{i}  {datetime.fromtimestamp(t / 1000, tz).strftime('%H:%M:%S')}", fill=(0, 0, 0))
     return sheet
+
+
+# ---------------------------------------------------------------- stream mode: one second in, only the changes out
+DELTA_PROMPT = (
+    "You are given {k} consecutive frames covering the last {period:.0f} second(s) of one camera view, and the CURRENT STATE recorded so far. "
+    "People carry an id label drawn on their box; use those ids. Reply with ONE compact JSON object describing ONLY what changed in these "
+    "frames compared with the state, in at most 60 tokens, no prose:\n"
+    '{{"p": {{"<id>": {{"a": "<new action, <= 8 words>", "o": ["<object handled>"]}}}}, "s": [{{"o": "<object>", "st": "<new state>"}}], '
+    '"e": "<event, <= 8 words, or omit>"}}\n'
+    "If nothing changed, reply exactly {{}}. Never repeat what the state already says. Describe only what is visible.\n"
+    "CURRENT STATE: {state}"
+)
+
+
+def build_delta_prompt(k: int, period_s: float, state: dict) -> str:
+    compact = {"people": {pid: {"action": v.get("action"), "objects": v.get("objects", [])[:4]} for pid, v in (state.get("people") or {}).items()},
+               "objects": [{"o": o["object"], "st": o.get("state")} for o in (state.get("objects") or [])[:12]]}
+    return DELTA_PROMPT.format(k=k, period=period_s, state=json.dumps(compact, separators=(",", ":"))[:900])
+
+
+def parse_delta_reply(text: str) -> dict | None:
+    t = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if t.startswith("```"):
+        t = t.strip("`"); t = t[4:] if t.lower().startswith("json") else t
+    a, b = t.find("{"), t.rfind("}")
+    if a < 0 or b < 0:
+        return None
+    try:
+        o = json.loads(t[a:b + 1])
+    except Exception:
+        return None
+    if not isinstance(o, dict):
+        return None
+    people = {}
+    for pid, v in (o.get("p") or {}).items():
+        if isinstance(v, dict):
+            people[str(pid)[:20]] = {"action": (str(v.get("a"))[:80] if v.get("a") else None),
+                                     "objects": [str(x)[:40] for x in (v.get("o") or []) if isinstance(x, str)][:6]}
+    objects = [{"object": str(x.get("o"))[:40], "state": (str(x.get("st"))[:30] if x.get("st") else None)} for x in (o.get("s") or []) if isinstance(x, dict) and x.get("o")]
+    event = str(o.get("e"))[:80] if o.get("e") else None
+    return {"people": people, "objects": objects, "event": event, "empty": not (people or objects or event)}
+
+
+def apply_delta(state: dict, delta: dict, t_ms: int) -> dict:
+    """Fold a delta into the running state (what the next prompt sees, and what the lib snapshot is)."""
+    st = {"people": dict(state.get("people") or {}), "objects": list(state.get("objects") or []), "t_ms": t_ms}
+    for pid, v in (delta.get("people") or {}).items():
+        cur = dict(st["people"].get(pid) or {})
+        if v.get("action"):
+            cur["action"] = v["action"]; cur["since_ms"] = t_ms
+        if v.get("objects"):
+            cur["objects"] = v["objects"]
+        st["people"][pid] = cur
+    for o in delta.get("objects") or []:
+        for existing in st["objects"]:
+            if existing["object"].lower() == o["object"].lower():
+                existing["state"] = o["state"]; existing["changed_ms"] = t_ms; break
+        else:
+            st["objects"].append({"object": o["object"], "state": o["state"], "changed_ms": t_ms})
+    st["objects"] = st["objects"][-30:]
+    return st

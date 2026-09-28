@@ -10,7 +10,7 @@ LOG=/tmp/vi_api.log; TLOG=/tmp/cloudflared.log
 cmd="${1:-start}"
 if [ "$cmd" = stop ]; then pkill -f "[r]un_ingest.py" 2>/dev/null; pkill -f "[u]vicorn vi.api.server" 2>/dev/null; pkill -f "[c]loudflared tunnel" 2>/dev/null; sleep 1; echo "stopped (ingest, api, tunnel)"; exit 0; fi
 if [ "$cmd" = url ]; then grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$TLOG" | tail -1; exit 0; fi
-export VI_DB="${VI_DB:-${DB_URL:-sqlite+pysqlite:///data/vi.db}}" VI_BACKEND="${VI_BACKEND:-transformers}" VI_MODEL="${VI_MODEL:-Qwen/Qwen3.5-4B}" VI_TZ="${VI_TZ:-UTC}"
+export VI_DB="${VI_DB:-${DB_URL:-sqlite+pysqlite:///data/vi.db}}" VI_BACKEND="${VI_BACKEND:-transformers}" VI_MODEL="${VI_MODEL:-Qwen/Qwen3.5-4B}" VI_TZ="${VI_TZ:-UTC}" VI_OPENAI_BASE="${VI_OPENAI_BASE:-http://127.0.0.1:8001/v1}" PORT="$PORT"
 pkill -f "[u]vicorn vi.api.server" 2>/dev/null; sleep 1
 nohup python -m uvicorn vi.api.server:app --host 0.0.0.0 --port "$PORT" > "$LOG" 2>&1 &
 for i in $(seq 1 60); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 2; done

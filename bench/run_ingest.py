@@ -79,6 +79,8 @@ class Cam:
     vol_frames: list = field(default_factory=list)      # (t_ms, annotated frame) collected during the current period
     vol_t0: int | None = None
     vol_prev_summary: str | None = None
+    stream_state: dict = field(default_factory=dict)   # stream mode: the running state the deltas fold into
+    vol_wall_t0: float = 0.0
     frame_ring: dict = field(default_factory=dict)      # tube_id -> [(t_ms, wide crop), ...] for narration
     last_narrate: dict = field(default_factory=dict)
 
@@ -103,6 +105,7 @@ def main() -> None:
     ap.add_argument("--volume-s", type=float, default=5.0, help="frame-volume period for the generator (0 = off; default on)")
     ap.add_argument("--volume-frames", type=int, default=6, help="frames sampled per volume")
     ap.add_argument("--volume-max-w", type=int, default=1120, help="downscale volume frames to this width (token budget)")
+    ap.add_argument("--stream", action="store_true", help="stream mode: 3 fps, one DELTA per second (<= 80 tokens), written to the lib immediately")
     ap.add_argument("--scene-every-s", type=float, default=0.0, help="legacy full-frame inventory pass (0 = off; the volume covers it)")
     ap.add_argument("--narrate-every-s", type=float, default=0.0, help="legacy narration pass (0 = off; the volume covers it)")
     ap.add_argument("--zones", default=None, help="zones JSON (single camera); grid cameras get border exits + label media zones")
@@ -116,6 +119,8 @@ def main() -> None:
                     "auto = data/tiles.json if present (homo/hetero learned by /tiles/recompute) else per camera; none = per camera; or a JSON path")
     a = ap.parse_args()
 
+    if a.stream:
+        a.fps, a.volume_s, a.volume_frames, a.flush_s = 3.0, 1.0, 3, 1.0
     profile = load_profile(a.profile)
     tube_classes = set(profile.tube_classes)
     start_ms = parse_start(a.start_time)
@@ -172,17 +177,18 @@ def main() -> None:
                     return
                 cam_id, tids, crops, mode = item
                 try:
-                    if mode == "volume":
+                    if mode in ("volume", "delta"):
                         meta = tids                                    # dict carried in the tids slot
                         payload = {"camera_id": cam_id, "t0_ms": meta["t0_ms"], "period_ms": meta["period_ms"], "times_ms": meta["times_ms"],
-                                   "ids_present": meta["ids_present"], "previous_summary": meta.get("previous_summary"), "frames_jpeg_b64": []}
+                                   "ids_present": meta["ids_present"], "previous_summary": meta.get("previous_summary"), "frames_jpeg_b64": [],
+                                   "state": meta.get("state")}
                         for c in crops:
                             buf = io.BytesIO(); Image.fromarray(np.ascontiguousarray(c)).save(buf, format="JPEG", quality=80)
                             payload["frames_jpeg_b64"].append(base64.b64encode(buf.getvalue()).decode())
-                        req = urllib.request.Request(remote.rsplit("/", 1)[0] + "/volume", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+                        req = urllib.request.Request(remote.rsplit("/", 1)[0] + ("/delta" if mode == "delta" else "/volume"), data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
                         r = json.load(urllib.request.urlopen(req, timeout=240))
                         r["meta"] = meta
-                        _results.put((cam_id, r, "volume")); continue
+                        _results.put((cam_id, r, mode)); continue
                     payload = {"camera_id": cam_id, "tube_ids": tids, "crops_jpeg_b64": [], "mode": mode}
                     for c in crops:
                         buf = io.BytesIO(); Image.fromarray(np.ascontiguousarray(c)).save(buf, format="JPEG", quality=85)
@@ -202,8 +208,8 @@ def main() -> None:
             def submit(self, cam_id, crops, tids, mode="appearance"):
                 if mode in ("scene", "narrate") and _q.qsize() >= 24:
                     return False                                          # people first; inventory/narration can wait
-                if mode == "volume" and _q.qsize() >= 4:
-                    return False                                          # never queue volumes: a stale volume is worthless
+                if mode in ("volume", "delta") and _q.qsize() >= (1 if mode == "delta" else 4):
+                    return False                                          # never queue: a stale volume/delta is worthless
                 try:
                     _q.put_nowait((cam_id, tids if isinstance(tids, dict) else list(tids), list(crops), mode)); self.calls += 1; return True
                 except queue.Full:
@@ -254,6 +260,7 @@ def main() -> None:
     stats: Counter = Counter()
     detect_ms: list[float] = []
     volume_ms: list[float] = []
+    frame_to_lib_ms: list[float] = []
 
     def init_cam(cam: Cam, w: int, h: int) -> None:
         cam.w, cam.h = w, h
@@ -318,6 +325,46 @@ def main() -> None:
         print(f"[volume] {cam.camera_id} {datetime.fromtimestamp(t_end / 1000, timezone.utc).strftime('%H:%M:%S')}Z ({r.get('ms', 0) / 1000:.1f}s, video={r.get('video_input')}): {rec.get('summary')}"
               + "".join(f"\n          {p['id']}: " + " → ".join(p.get('actions') or []) for p in rec.get("people", [])[:3])
               + (f"\n          objects changed: " + ", ".join(o['object'] for o in rec.get('objects', []) if o.get('changed')) if any(o.get('changed') for o in rec.get('objects', [])) else ""), flush=True)
+
+    def apply_delta_record(cam: Cam, r: dict) -> None:
+        from vi.schemas import EnrichmentPatch
+        from vi.writer import apply_delta
+        d = r.get("delta"); meta = r.get("meta") or {}
+        if d is None:
+            stats["delta_failed"] += 1; return
+        t_end = int(meta.get("t0_ms", 0)) + int(meta.get("period_ms", 0))
+        cam.stream_state = apply_delta(cam.stream_state, d, t_end)
+        stats["deltas"] += 1; stats["volumes"] += 1
+        if r.get("ms"):
+            volume_ms.append(float(r["ms"]))
+        if d.get("empty"):
+            stats["deltas_empty"] += 1
+        if cam.ep is None:
+            return
+        patch = EnrichmentPatch(patch_id=f"dl_{cam.camera_id}_{meta.get('t0_ms')}", tube_id=f"{cam.camera_id}:volume", produced_at_ms=t_end, source="vlm:volume",
+                                payload={"camera_id": cam.camera_id, "t0_ms": meta.get("t0_ms"), "period_ms": meta.get("period_ms"), "kind": "delta",
+                                         "delta": d, "state": cam.stream_state,
+                                         "people": [{"id": pid, "actions": [v["action"]] if v.get("action") else [], "objects_handled": [{"object": o, "state": None} for o in v.get("objects", [])]}
+                                                    for pid, v in cam.stream_state.get("people", {}).items()],
+                                         "objects": [{"object": o["object"], "state": o.get("state"), "changed": o.get("changed_ms") == t_end} for o in cam.stream_state.get("objects", [])],
+                                         "events": ([{"t": None, "who": None, "what": d["event"], "kind": "delta"}] if d.get("event") else []),
+                                         "summary": "; ".join(f"{pid}: {v.get('action')}" for pid, v in cam.stream_state.get("people", {}).items() if v.get("action")),
+                                         "ms": r.get("ms")}, confidence=0.6)
+        writer.write_patch(cam.ep, patch)
+        try:
+            inc.flush(writer.path(cam.ep))                                # immediately: the lib is current within one delta
+        except Exception:
+            pass
+        wall_frame = meta.get("wall_newest")
+        if wall_frame:
+            lat = (time.time() - float(wall_frame)) * 1000
+            frame_to_lib_ms.append(lat)
+        if not d.get("empty"):
+            print(f"[delta] {datetime.fromtimestamp(t_end / 1000, timezone.utc).strftime('%H:%M:%S')}Z ({r.get('ms', 0) / 1000:.2f}s model, "
+                  f"{(frame_to_lib_ms[-1] / 1000) if frame_to_lib_ms else 0:.2f}s frame->lib): "
+                  + "; ".join(f"{pid}: {v.get('action')}" + (f" [{', '.join(v.get('objects') or [])}]" if v.get('objects') else "") for pid, v in d.get("people", {}).items())
+                  + (f" | {', '.join(o['object'] + ' -> ' + str(o['state']) for o in d.get('objects', []))}" if d.get("objects") else "")
+                  + (f" | event: {d['event']}" if d.get("event") else ""), flush=True)
 
     def apply_scene(cam: Cam, r: dict) -> None:
         from vi.schemas import EnrichmentPatch
@@ -587,8 +634,8 @@ def main() -> None:
                                               if tr.tube.class_label == "person" and tr.tube.state.value == "active"}) if vc.camera_id == "composite" else \
                                       sorted({world_label(tr.tube) for tr in vc.tracker._tracks.values() if tr.tube.class_label == "person" and tr.tube.state.value == "active"} if vc.tracker else set())
                         meta = {"t0_ms": vc.vol_t0, "period_ms": period_ms, "times_ms": [t for t, _ in vc.vol_frames], "ids_present": ids_present,
-                                "previous_summary": vc.vol_prev_summary}
-                        if vlm.submit(vc.camera_id, [f for _, f in vc.vol_frames], meta, "volume"):
+                                "previous_summary": vc.vol_prev_summary, "state": (vc.stream_state if a.stream else None), "wall_newest": time.time()}
+                        if vlm.submit(vc.camera_id, [f for _, f in vc.vol_frames], meta, "delta" if a.stream else "volume"):
                             stats["volume_sheets"] += 1
                         else:
                             stats["volume_dropped"] += 1
@@ -599,6 +646,8 @@ def main() -> None:
                     stats["writer_errors"] += 1; continue
                 if mode == "volume":
                     apply_volume(cams[cam_id], payload); continue
+                if mode == "delta":
+                    apply_delta_record(cams[cam_id], payload); continue
                 if mode == "scene":
                     apply_scene(cams[cam_id], payload)
                 elif mode == "narrate":
@@ -627,7 +676,9 @@ def main() -> None:
                                                               "volume_s": a.volume_s, "volumes_done": stats["volumes"], "volumes_submitted": stats["volume_sheets"],
                                                               "volumes_dropped": stats["volume_dropped"], "periods_elapsed": round(periods, 1),
                                                               "generator_coverage": round(stats["volumes"] / periods, 2) if periods >= 1 else None,
-                                                              "volume_ms_p50": round(float(np.median(volume_ms[-20:])), 0) if volume_ms else None}))
+                                                              "volume_ms_p50": round(float(np.median(volume_ms[-20:])), 0) if volume_ms else None,
+                                                              "stream": bool(a.stream), "deltas": stats["deltas"], "deltas_empty": stats["deltas_empty"],
+                                                              "frame_to_lib_ms_p50": round(float(np.median(frame_to_lib_ms[-30:])), 0) if frame_to_lib_ms else None}))
         if a.flush_s and time.time() - last_flush_wall >= a.flush_s:
             flush_open(); last_flush_wall = time.time()
         frames += 1

@@ -363,3 +363,30 @@ def test_deploy_report_from_status(store_with_footage):
     assert r["perception"]["keeps_up"] and r["perception"]["estimated_max_cameras_at_this_fps"] >= 8
     assert r["generator"]["keeps_up"] is False and r["generator"]["sustainable_period_s"] == 29
     assert "generator covers 32%" in r["verdict"] and "perception keeps up" in r["verdict"]
+
+
+def test_stream_mode_deltas_fold_into_state_and_reach_the_lib_fast(store_with_footage, tmp_path):
+    from fastapi.testclient import TestClient
+    from vi.api import create_app
+    from vi.writer import apply_delta, parse_delta_reply
+    db, tmp = store_with_footage
+    st = {}
+    for text, t in [('{"p":{"W1":{"a":"lifts an item from a container","o":["item"]}}}', 1000), ('{}', 2000),
+                    ('{"s":[{"o":"container","st":"empty"}],"e":"container emptied"}', 3000)]:
+        d = parse_delta_reply(text); st = apply_delta(st, d, t)
+    assert st["people"]["W1"]["action"] == "lifts an item from a container" and st["objects"][0]["state"] == "empty" and st["objects"][0]["changed_ms"] == 3000
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", live_dir=str(tmp / "live"), load_backend=False)
+    c = TestClient(app)
+    r = c.post("/delta", json={"camera_id": "composite", "t0_ms": 0, "period_ms": 1000, "times_ms": [166, 500, 833], "frames_jpeg_b64": [], "ids_present": ["W1"], "state": st}).json()
+    assert r["delta"]["people"]["W1"]["action"]
+    # stream ingest end to end with the fake writer path (no remote): stream flags applied
+    import subprocess, sys as _sys, os as _os
+    from vi.ingest.synthetic import write_walk_clip
+    clip = write_walk_clip(tmp_path / "walk.mp4", seconds=6, fps=10)
+    out = subprocess.run([_sys.executable, "bench/run_ingest.py", "--source", str(clip), "--db", f"sqlite+pysqlite:///{tmp_path / 's.db'}", "--model", "fake", "--reid", "hist",
+                          "--writer", "none", "--stream", "--start-time", "2026-09-27T10:00:00+00:00", "--out", str(tmp_path / "ep"), "--live-dir", str(tmp_path / "live")],
+                         capture_output=True, text=True, env={**_os.environ, "PYTHONPATH": _os.getcwd()})
+    assert out.returncode == 0, out.stderr[-1200:]
+    import json as _json
+    st2 = _json.loads((tmp_path / "live" / "status.json").read_text())
+    assert st2["stream"] is True and st2["fps"] == 3.0 and st2["volume_s"] == 1.0

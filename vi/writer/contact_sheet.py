@@ -261,6 +261,38 @@ class WriterVLM:
         sheet = pack_sheet(frames, cell=256, cols=3)
         return parse_narration_reply(self._generate(sheet, NARRATE_PROMPT, 500))
 
+    def delta(self, vol, state: dict, tz_name: str = "UTC") -> dict | None:
+        """Stream mode: the last second's frames + the current state -> only the changes, <= 80 new tokens."""
+        from .volume import build_delta_prompt, parse_delta_reply
+        prompt = build_delta_prompt(len(vol.frames), vol.period_ms / 1000, state)
+        rec = self._volume_text(vol, prompt, tz_name, max_new_tokens=80)
+        return parse_delta_reply(rec or "")
+
+    def _volume_text(self, vol, prompt: str, tz_name: str, max_new_tokens: int) -> str | None:
+        from .volume import grid_fallback, volume_to_messages
+        t0 = time.perf_counter()
+        text = None
+        try:
+            messages, _ = volume_to_messages(vol, prompt, tz_name)
+            try:
+                inputs = self.proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt", enable_thinking=False)
+            except TypeError:
+                inputs = self.proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt")
+            inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+            with self.torch.no_grad():
+                out = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+            gen = out[0][inputs["input_ids"].shape[1]:]
+            tok = getattr(self.proc, "tokenizer", self.proc)
+            text = tok.decode(gen, skip_special_tokens=True)
+            self.video_ok = True
+        except Exception as e:
+            self.video_ok = False
+            self.last_error = f"{type(e).__name__}: {str(e)[:120]}"
+            text = self._generate(grid_fallback(vol, tz_name), prompt + "\n(The frames are laid out as a grid with their times under each cell.)", max_new_tokens)
+        self.calls += 1
+        self.last_ms = (time.perf_counter() - t0) * 1000
+        return text
+
     def volume(self, vol, prompt: str, tz_name: str = "UTC", max_new_tokens: int = 700) -> dict | None:
         """One call per frame-volume. Video input if the processor takes it; a labelled time grid otherwise."""
         from .volume import grid_fallback, parse_volume_reply, volume_to_messages
@@ -307,3 +339,62 @@ class WriterVLM:
         self.calls += 1
         self.last_ms = (time.perf_counter() - t0) * 1000
         return parse_sheet_reply(text, tube_ids, modality)
+
+
+class OpenAIWriter:
+    """The same writer roles against an OpenAI-compatible multimodal server (vLLM / SGLang): frames go as
+    base64 data URLs. This is the fast path: continuous batching, prefix caching, 100+ tok/s decode."""
+
+    name = "openai-writer"
+
+    def __init__(self, base_url: str = "http://127.0.0.1:8000/v1", model: str = "Qwen/Qwen3.5-35B-A3B", api_key: str = "EMPTY", timeout: float = 120.0):
+        import urllib.request
+        self.base_url, self.model, self.api_key, self.timeout = base_url.rstrip("/"), model, api_key, timeout
+        self._req = urllib.request
+        self.calls = 0; self.last_ms = 0.0; self.video_ok = True; self.last_error = None
+
+    def _chat(self, images, text: str, max_tokens: int) -> str:
+        import base64, io, json as _json
+        from PIL import Image
+        content = []
+        for im in images:
+            pil = im if isinstance(im, Image.Image) else Image.fromarray(np.ascontiguousarray(im)).convert("RGB")
+            buf = io.BytesIO(); pil.save(buf, format="JPEG", quality=85)
+            content.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}})
+        content.append({"type": "text", "text": text})
+        body = {"model": self.model, "messages": [{"role": "user", "content": content}], "max_tokens": max_tokens, "temperature": 0.0,
+                "chat_template_kwargs": {"enable_thinking": False}}
+        t0 = time.perf_counter()
+        req = self._req.Request(self.base_url + "/chat/completions", data=_json.dumps(body).encode(), method="POST",
+                                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"})
+        try:
+            with self._req.urlopen(req, timeout=self.timeout) as r:
+                out = _json.loads(r.read().decode())
+        except Exception:
+            body.pop("chat_template_kwargs", None)
+            req = self._req.Request(self.base_url + "/chat/completions", data=_json.dumps(body).encode(), method="POST",
+                                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"})
+            with self._req.urlopen(req, timeout=self.timeout) as r:
+                out = _json.loads(r.read().decode())
+        self.calls += 1; self.last_ms = (time.perf_counter() - t0) * 1000
+        return out["choices"][0]["message"]["content"]
+
+    def describe(self, crops, tube_ids, modality=Modality.rgb, mode: str = "appearance"):
+        return parse_sheet_reply(self._chat([pack_sheet(crops)], ACTIVITY_PROMPT if mode == "activity" else WRITER_PROMPT, 700), tube_ids, modality)
+
+    def scene(self, frame):
+        return parse_scene_reply(self._chat([frame], SCENE_PROMPT, 900))
+
+    def narrate(self, frames):
+        return parse_narration_reply(self._chat([pack_sheet(frames, cell=256, cols=3)], NARRATE_PROMPT, 500))
+
+    def inspect(self, image, question: str, max_new_tokens: int = 200) -> str:
+        return re.sub(r"<think>.*?</think>", "", self._chat([image], "Answer the question about this camera frame in <= 40 words, describing only what is visible. Question: " + question, max_new_tokens), flags=re.DOTALL).strip()
+
+    def volume(self, vol, prompt: str, tz_name: str = "UTC", max_new_tokens: int = 700):
+        from .volume import parse_volume_reply
+        return parse_volume_reply(self._chat(list(vol.frames), prompt + "\n(The images are the frames in time order.)", max_new_tokens))
+
+    def delta(self, vol, state: dict, tz_name: str = "UTC"):
+        from .volume import build_delta_prompt, parse_delta_reply
+        return parse_delta_reply(self._chat(list(vol.frames), build_delta_prompt(len(vol.frames), vol.period_ms / 1000, state) + "\n(The images are the frames in time order.)", 80))

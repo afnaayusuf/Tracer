@@ -50,6 +50,7 @@ class VolumeIn(BaseModel):
     frames_jpeg_b64: list[str]              # annotated frames, time order
     ids_present: list[str] = []
     previous_summary: str | None = None
+    state: dict | None = None               # stream mode: the current state; the reply is a delta
 
 
 class InspectIn(BaseModel):
@@ -74,7 +75,8 @@ class IngestIn(BaseModel):
     tiles: str = "auto"              # "one" = homo BuF (all cameras one space); "auto" = learned map if present; "none" = per camera
     auto_tiles_after_min: float = 5  # with tiles="auto" and no map yet: learn the map after this much footage and restart seamlessly
     skip_s: float = 0
-    volume_s: float = 8.0            # frame-volume period for the generator (5 on vLLM; 8-10 on the transformers path)
+    volume_s: float = 8.0            # generator period; stream mode uses 1 s
+    stream: bool = False             # stream mode: 3 fps, one delta per second, immediate lib write
 
 
 def create_app(db_url: str | None = None, backend_name: str | None = None, model: str | None = None,
@@ -110,7 +112,7 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
                     state["backend"] = FakeBackend()
                 elif backend_name == "openai":
                     from vi.agent import OpenAIBackend
-                    state["backend"] = OpenAIBackend(model=model)
+                    state["backend"] = OpenAIBackend(model=model, base_url=os.environ.get("VI_OPENAI_BASE", "http://127.0.0.1:8001/v1"))
                 else:
                     from vi.agent import TransformersBackend
                     state["backend"] = TransformersBackend(model_id=model)
@@ -126,6 +128,9 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
             if getattr(be, "name", "") == "transformers" and getattr(be, "model", None) is not None:
                 from vi.writer import WriterVLM
                 state["writer"] = WriterVLM(backend=be)
+            elif getattr(be, "name", "") == "openai":
+                from vi.writer import OpenAIWriter
+                state["writer"] = OpenAIWriter(base_url=be.base_url, model=be.model)     # the vLLM server: images as data URLs
             else:
                 state["writer"] = "fake"
         return state["writer"]
@@ -251,6 +256,28 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
             rec = w.volume(vol, prompt, tz_name)
         state["sheets"] += 1; state["sheet_ms"].append(w.last_ms); state["sheet_ms"] = state["sheet_ms"][-50:]
         return {"record": rec, "ms": w.last_ms, "video_input": getattr(w, "video_ok", None), "error": getattr(w, "last_error", None) if rec is None else None}
+
+    @app.post("/delta")
+    def delta(inp: VolumeIn):
+        """Stream mode: the last second's frames + the state -> only what changed (<= 80 tokens). Questions still first."""
+        import base64, io
+        import numpy as np
+        from PIL import Image
+        from vi.writer import FrameVolume
+        frames = [np.asarray(Image.open(io.BytesIO(base64.b64decode(b))).convert("RGB")) for b in inp.frames_jpeg_b64]
+        vol = FrameVolume(camera_id=inp.camera_id, t0_ms=inp.t0_ms, period_ms=inp.period_ms, frames=frames, times_ms=inp.times_ms, ids_present=inp.ids_present)
+        w = writer()
+        if w == "fake":
+            pid = (inp.ids_present or ["unlabeled"])[0]
+            return {"delta": {"people": {pid: {"action": "moves through the view", "objects": []}}, "objects": [], "event": None, "empty": False}, "ms": 0}
+        for _ in range(100):
+            if state["questions_waiting"] == 0:
+                break
+            time.sleep(0.05)
+        with state["model_lock"]:
+            d = w.delta(vol, inp.state or {}, tz_name)
+        state["sheets"] += 1; state["sheet_ms"].append(w.last_ms); state["sheet_ms"] = state["sheet_ms"][-50:]
+        return {"delta": d, "ms": w.last_ms, "video_input": getattr(w, "video_ok", None)}
 
     @app.post("/inspect")
     def inspect(inp: InspectIn):
@@ -406,7 +433,7 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         cmd = [sys.executable, "bench/run_ingest.py", "--source", inp.source, "--db", db_url, "--profile", inp.profile, "--reid", inp.reid,
                "--writer", writer_mode, "--writer-url", f"http://127.0.0.1:{os.environ.get('PORT', '8000')}/describe",
                "--model", inp.model, "--fps", str(inp.fps), "--episode-min", str(inp.episode_min), "--live-dir", str(live_dir),
-               "--tiles", inp.tiles, "--volume-s", str(inp.volume_s)]
+               "--tiles", inp.tiles, "--volume-s", str(inp.volume_s)] + (["--stream"] if inp.stream else [])
         if inp.skip_s:
             cmd += ["--skip-s", str(inp.skip_s)]
         if inp.start_time:
@@ -601,10 +628,11 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
                            "keeps_up": (rt is not None and rt >= 0.97), "batch_headroom_x": headroom,
                            "estimated_max_cameras_at_this_fps": max_cams_est,
                            "note": "realtime_factor is 1.0 when paced to the clock; headroom is the unpaced margin"},
-            "generator": {"volume_period_s": vol_s, "call_ms_p50": vms, "coverage": cov, "volumes_done": st.get("volumes_done"),
-                          "volumes_dropped": st.get("volumes_dropped"), "keeps_up": (cov is not None and cov >= 0.9),
-                          "sustainable_period_s": sustainable_period,
-                          "note": "coverage = periods with a record / periods elapsed; below 1.0 the record has gaps, never stale entries"},
+            "generator": {"mode": "stream (deltas)" if st.get("stream") else "periods", "volume_period_s": vol_s, "call_ms_p50": vms, "coverage": cov,
+                          "volumes_done": st.get("volumes_done"), "volumes_dropped": st.get("volumes_dropped"), "keeps_up": (cov is not None and cov >= 0.9),
+                          "sustainable_period_s": sustainable_period, "frame_to_lib_ms_p50": st.get("frame_to_lib_ms_p50"),
+                          "meets_1s": (st.get("frame_to_lib_ms_p50") is not None and st["frame_to_lib_ms_p50"] <= 1000),
+                          "note": "coverage = periods with a record / periods elapsed; frame_to_lib = newest frame captured -> its delta in the store"},
             "model": {"name": model, "backend": backend_name, "sheet_ms_p50": (sorted(state["sheet_ms"])[len(state["sheet_ms"]) // 2] if state["sheet_ms"] else None)},
             "gpu": None,
         }
@@ -620,6 +648,8 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         elif rt is not None: verdict.append(f"perception is behind real time ({rt}x)")
         if cov is not None:
             verdict.append(f"generator covers {int(cov * 100)}% of periods at {vol_s}s" + (f"; sustainable period ~{sustainable_period}s on this model/GPU" if sustainable_period else ""))
+        if st.get("frame_to_lib_ms_p50") is not None:
+            verdict.append(f"frame->lib {st['frame_to_lib_ms_p50'] / 1000:.2f}s p50 " + ("(meets the 1 s target)" if st["frame_to_lib_ms_p50"] <= 1000 else "(above 1 s)"))
         report["verdict"] = "; ".join(verdict) or "not enough footage yet"
         return report
 
