@@ -1,1 +1,1 @@
-{"frames": 2860, "footage_s": 715.0, "wall_s": 715.1, "cameras": 4, "live_tubes": 8, "per_camera": {"cam01": 3, "cam02": 2, "cam03": 2, "cam04": 1}, "now_ms": 1790484115000, "episodes": 8, "sheets": 27, "detect_ms_p50": 29.7}
+{"frames": 5176, "footage_s": 1294.0, "wall_s": 1294.1, "cameras": 4, "live_tubes": 4, "per_camera": {"cam01": 1, "cam02": 1, "cam03": 1, "cam04": 1}, "now_ms": 1790484694000, "episodes": 16, "sheets": 59, "detect_ms_p50": 29.8}
