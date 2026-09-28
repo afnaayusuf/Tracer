@@ -347,3 +347,19 @@ def test_volume_records_become_periods_in_the_script_and_lib(store_with_footage)
     app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", live_dir=str(tmp / "live"), load_backend=False)
     d = TestClient(app).get("/lib/summary").json()
     assert d["periods"] and d["periods"][0]["summary"].startswith("One person opens")
+
+
+def test_deploy_report_from_status(store_with_footage):
+    import json as _json
+    from fastapi.testclient import TestClient
+    from vi.api import create_app
+    db, tmp = store_with_footage
+    (tmp / "live").mkdir(exist_ok=True)
+    (tmp / "live" / "status.json").write_text(_json.dumps({"frames": 400, "footage_s": 100.0, "wall_s": 101.0, "cameras": 4, "fps": 4, "detect_ms_p50": 30.0,
+                                                          "volume_s": 8, "volumes_done": 4, "volumes_submitted": 12, "volumes_dropped": 8, "periods_elapsed": 12.5,
+                                                          "generator_coverage": 0.32, "volume_ms_p50": 24000, "now_ms": 0, "episodes": 1, "sheets": 0, "live_tubes": 1}))
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", live_dir=str(tmp / "live"), load_backend=False)
+    r = TestClient(app).get("/deploy/report").json()
+    assert r["perception"]["keeps_up"] and r["perception"]["estimated_max_cameras_at_this_fps"] >= 8
+    assert r["generator"]["keeps_up"] is False and r["generator"]["sustainable_period_s"] == 29
+    assert "generator covers 32%" in r["verdict"] and "perception keeps up" in r["verdict"]

@@ -208,9 +208,9 @@ class TransformersBackend:
             try:
                 cls = getattr(__import__("transformers", fromlist=[loader]), loader)
                 try:
-                    self.model = cls.from_pretrained(model_id, dtype=dtype, attn_implementation="sdpa").to(self.device).eval()
+                    self.model = cls.from_pretrained(model_id, dtype=dtype, attn_implementation="sdpa", device_map=self.device).eval()
                 except Exception:
-                    self.model = cls.from_pretrained(model_id, dtype=dtype).to(self.device).eval()
+                    self.model = cls.from_pretrained(model_id, dtype=dtype, device_map=self.device).eval()
                 self.loader = loader
                 break
             except Exception as e:  # pragma: no cover

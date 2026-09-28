@@ -253,6 +253,7 @@ def main() -> None:
     frames = 0; t_wall0 = time.time(); pts0 = None
     stats: Counter = Counter()
     detect_ms: list[float] = []
+    volume_ms: list[float] = []
 
     def init_cam(cam: Cam, w: int, h: int) -> None:
         cam.w, cam.h = w, h
@@ -303,6 +304,8 @@ def main() -> None:
                                 payload={"camera_id": cam.camera_id, "t0_ms": meta.get("t0_ms"), "period_ms": meta.get("period_ms"), **rec,
                                          "video_input": r.get("video_input"), "ms": r.get("ms")}, confidence=float(rec.get("confidence", 0.6)))
         writer.write_patch(cam.ep, patch); stats["volumes"] += 1
+        if r.get("ms"):
+            volume_ms.append(float(r["ms"]))
         for pdesc in rec.get("people", []):
             eid = pdesc.get("id")
             if not eid or eid == "unlabeled":
@@ -614,11 +617,17 @@ def main() -> None:
                     (live_dir / "latest.tmp.jpg").replace(live_dir / "latest.jpg")
                 except Exception:
                     pass
-            (live_dir / "status.json").write_text(json.dumps({"frames": frames, "footage_s": round((fr.pts_ms - pts0) / 1000, 1),
-                                                              "wall_s": round(time.time() - t_wall0, 1), "cameras": n_cams,
+            footage_s_now = (fr.pts_ms - pts0) / 1000
+            periods = footage_s_now / a.volume_s if a.volume_s else 0
+            (live_dir / "status.json").write_text(json.dumps({"frames": frames, "footage_s": round(footage_s_now, 1),
+                                                              "wall_s": round(time.time() - t_wall0, 1), "cameras": n_cams, "fps": a.fps,
                                                               "live_tubes": sum(cam_live.values()), "per_camera": cam_live, "now_ms": t_ms,
                                                               "episodes": stats["episodes"], "sheets": stats["sheets"],
-                                                              "detect_ms_p50": round(float(np.median(detect_ms[-50:])), 1) if detect_ms else None}))
+                                                              "detect_ms_p50": round(float(np.median(detect_ms[-50:])), 1) if detect_ms else None,
+                                                              "volume_s": a.volume_s, "volumes_done": stats["volumes"], "volumes_submitted": stats["volume_sheets"],
+                                                              "volumes_dropped": stats["volume_dropped"], "periods_elapsed": round(periods, 1),
+                                                              "generator_coverage": round(stats["volumes"] / periods, 2) if periods >= 1 else None,
+                                                              "volume_ms_p50": round(float(np.median(volume_ms[-20:])), 0) if volume_ms else None}))
         if a.flush_s and time.time() - last_flush_wall >= a.flush_s:
             flush_open(); last_flush_wall = time.time()
         frames += 1

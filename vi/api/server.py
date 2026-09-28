@@ -577,6 +577,52 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
                     time.sleep(2)
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
+    @app.get("/deploy/report")
+    def deploy_report():
+        """Deployability, measured on the running system: does each lane keep up with live footage, and how far
+        can it be pushed? Perception lane: decode+detect+track per camera-frame. Generator lane: one model call per
+        frame-volume. Both from the ingest's own counters."""
+        import math
+        st = ingest_status()
+        fps = float(st.get("fps") or 4.0); cams = int(st.get("cameras") or 1)
+        det = st.get("detect_ms_p50"); foot, wall = st.get("footage_s"), st.get("wall_s")
+        rt = round(foot / wall, 2) if foot and wall else None
+        # perception: the batch cost is nearly flat in batch size on one GPU (measured: 27 ms for 1 cell, 30 ms for 4, ~166 ms for 16 with medium)
+        per_frame_budget_ms = 1000.0 / fps
+        headroom = round(per_frame_budget_ms / det, 1) if det else None
+        max_cams_est = None
+        if det:
+            per_cell = det / max(1, cams)                                      # amortised cost per camera-frame in the batch
+            max_cams_est = int(per_frame_budget_ms / max(per_cell, 5.0))       # floor of 5 ms/cell: decode + track are not free
+        vol_s = st.get("volume_s"); vms = st.get("volume_ms_p50"); cov = st.get("generator_coverage")
+        sustainable_period = math.ceil(vms / 1000 * 1.2) if vms else None
+        report = {
+            "perception": {"cameras": cams, "fps": fps, "detect_ms_p50_per_batch": det, "realtime_factor": rt,
+                           "keeps_up": (rt is not None and rt >= 0.97), "batch_headroom_x": headroom,
+                           "estimated_max_cameras_at_this_fps": max_cams_est,
+                           "note": "realtime_factor is 1.0 when paced to the clock; headroom is the unpaced margin"},
+            "generator": {"volume_period_s": vol_s, "call_ms_p50": vms, "coverage": cov, "volumes_done": st.get("volumes_done"),
+                          "volumes_dropped": st.get("volumes_dropped"), "keeps_up": (cov is not None and cov >= 0.9),
+                          "sustainable_period_s": sustainable_period,
+                          "note": "coverage = periods with a record / periods elapsed; below 1.0 the record has gaps, never stale entries"},
+            "model": {"name": model, "backend": backend_name, "sheet_ms_p50": (sorted(state["sheet_ms"])[len(state["sheet_ms"]) // 2] if state["sheet_ms"] else None)},
+            "gpu": None,
+        }
+        try:
+            import torch
+            if torch.cuda.is_available():
+                free, total = torch.cuda.mem_get_info()
+                report["gpu"] = {"name": torch.cuda.get_device_name(0), "total_gb": round(total / 1e9, 1), "free_gb": round(free / 1e9, 1)}
+        except Exception:
+            pass
+        verdict = []
+        if report["perception"]["keeps_up"]: verdict.append(f"perception keeps up at {fps:g} fps x {cams} cameras" + (f" (~{max_cams_est} cameras possible)" if max_cams_est else ""))
+        elif rt is not None: verdict.append(f"perception is behind real time ({rt}x)")
+        if cov is not None:
+            verdict.append(f"generator covers {int(cov * 100)}% of periods at {vol_s}s" + (f"; sustainable period ~{sustainable_period}s on this model/GPU" if sustainable_period else ""))
+        report["verdict"] = "; ".join(verdict) or "not enough footage yet"
+        return report
+
     @app.get("/tiles")
     def tiles():
         from vi.fusion import TileMap
