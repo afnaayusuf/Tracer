@@ -218,3 +218,18 @@ def test_activity_timeline_and_inspect_tool(store_with_footage, tmp_path):
     app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", keyframes_dir=str(tmp / "keyframes"), live_dir=str(tmp / "live"), load_backend=False)
     c = TestClient(app)
     assert "answer" in c.post("/inspect", json={"question": "what is on the counter?", "entity_id": entity_id}).json()
+
+
+def test_ask_never_returns_a_non_json_500(store_with_footage, monkeypatch):
+    from fastapi.testclient import TestClient
+    from vi.api import create_app
+    import vi.api.server as srv
+    db, tmp = store_with_footage
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", keyframes_dir=str(tmp / "keyframes"), live_dir=str(tmp / "live"), load_backend=False)
+    c = TestClient(app, raise_server_exceptions=False)
+    def boom(*a, **k):
+        raise RuntimeError("model exploded")
+    monkeypatch.setattr(srv, "ask_window", boom)
+    r = c.post("/ask", json={"question": "what is he doing right now?"})
+    assert r.status_code == 200 and r.json()["grounding"] == "error" and "model exploded" in r.json()["text"]
+    assert (tmp / "live" / "ask_errors.log").exists()

@@ -168,26 +168,31 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         return {"answer": text, "ref": ref, "ms": w.last_ms}
 
     def inspect_fn_unlocked(question: str, entity_id: str | None = None, camera_id: str | None = None, t_ms: int | None = None) -> dict:
-        """inspect() for use INSIDE ask (which already holds the model lock)."""
+        """inspect() for use INSIDE ask (which already holds the model lock). Never raises: a failure is an answer."""
         import numpy as np
         from PIL import Image
-        ref, img = None, None
-        if entity_id:
-            try:
-                refs = clip(engine, entity_id=entity_id).get("keyframe_refs", [])
-                if refs:
-                    ref = refs[-1]; p = keyframes_dir / ref.replace("kf://", "")
-                    if p.exists(): img = np.asarray(Image.open(p).convert("RGB"))
-            except Exception:
-                pass
-        if img is None and (live_dir / "latest.jpg").exists():
-            img = np.asarray(Image.open(live_dir / "latest.jpg").convert("RGB")); ref = "live frame"
-        if img is None:
-            return {"answer": "No frame is available to look at yet.", "ref": None}
-        w = writer()
-        if w == "fake":
-            return {"answer": f"(inspected {ref}) a person at a counter", "ref": ref}
-        return {"answer": w.inspect(img, question), "ref": ref, "ms": w.last_ms}
+        try:
+            ref, img = None, None
+            if entity_id:
+                try:
+                    refs = clip(engine, entity_id=entity_id).get("keyframe_refs", [])
+                    if refs:
+                        ref = refs[-1]; p = keyframes_dir / ref.replace("kf://", "")
+                        if p.exists(): img = np.asarray(Image.open(p).convert("RGB"))
+                except Exception:
+                    pass
+            if img is None and (live_dir / "latest.jpg").exists():
+                img = np.asarray(Image.open(live_dir / "latest.jpg").convert("RGB")); ref = "live frame"
+            if img is None:
+                return {"answer": "No frame is available to look at yet.", "ref": None}
+            w = writer()
+            if w == "fake":
+                return {"answer": f"(inspected {ref}) a person at a counter", "ref": ref}
+            return {"answer": w.inspect(img, question), "ref": ref, "ms": w.last_ms}
+        except Exception as e:
+            import traceback
+            print(f"[inspect] error: {type(e).__name__}: {e}\n{traceback.format_exc()}", flush=True)
+            return {"answer": f"inspect failed ({type(e).__name__}: {str(e)[:120]}); answer from the script instead.", "ref": None}
 
     @app.post("/inspect")
     def inspect(inp: InspectIn):
@@ -265,7 +270,18 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
             r = fut.result(timeout=deadline)
         except concurrent.futures.TimeoutError:
             return {"text": f"That took longer than {int(deadline)} s. Ask a narrower question (a camera or a time window), or try again in a moment.",
-                    "mood": "botUnsure", "citations": [], "evidence": [], "grounding": "timeout", "latency_ms": int(deadline * 1000)}
+                    "mood": "botUnsure", "citations": [], "evidence": [], "grounding": "timeout", "latency_ms": int(deadline * 1000), "action": "answer"}
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[ask] error: {type(e).__name__}: {e}\n{tb}", flush=True)
+            try:
+                (live_dir / "ask_errors.log").open("a").write(f"{datetime.now().isoformat()} {q!r}\n{tb}\n")
+            except Exception:
+                pass
+            return {"text": f"The engine hit an error answering that ({type(e).__name__}: {str(e)[:160]}). It has been logged; try rephrasing.",
+                    "mood": "botUnsure", "citations": [], "evidence": [], "grounding": "error", "latency_ms": 0, "action": "answer",
+                    "error": f"{type(e).__name__}: {str(e)[:300]}"}
         f = r["final"]
         text = f.get("text") or f.get("question") or ""
         unsure = f.get("action") == "clarify" or f.get("handled_by") in ("scope", "time") or not f.get("cited", False)
