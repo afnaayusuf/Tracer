@@ -109,6 +109,18 @@ serve_once() {  # $1 = label, rest = extra args
 # Blackwell sm_120 needs when the FlashAttention wheels have no kernels for it). attempt 3: smaller footprint.
 serve_once "defaults" && exit 0
 cp "$LOG" "${LOG%.log}.attempt1.log"
+if grep -q "No supported CUDA architectures" "$LOG"; then
+  cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)"
+  echo "   this vLLM wheel has no kernels for this GPU generation (compute capability ${cap:-?}); flags cannot fix that."
+  if [ "${VLLM_TRY_NIGHTLY:-1}" = "1" ]; then
+    echo "-- trying the vLLM nightly wheel (newer builds add new GPU generations)"
+    if "$VENV/bin/python" -m pip install -q --pre -U vllm --extra-index-url https://wheels.vllm.ai/nightly >/tmp/vllm_nightly.log 2>&1; then
+      serve_once "nightly wheel" && exit 0
+    else echo "   nightly install failed: $(tail -1 /tmp/vllm_nightly.log | cut -c1-120)"; fi
+  fi
+  echo "   -> use an H100 runtime for vLLM (supported), or serve the model on one (colab/model_server.sh) and set MODEL_URL here."
+  exit 1
+fi
 VLLM_ENV="VLLM_ATTENTION_BACKEND=TRITON_ATTN" serve_once "eager + Triton attention" --enforce-eager && exit 0
 cp "$LOG" "${LOG%.log}.attempt2.log"
 VLLM_ENV="VLLM_ATTENTION_BACKEND=TRITON_ATTN" VLLM_MAX_LEN=6144 VLLM_GPU_UTIL=0.6 serve_once "eager + Triton + small" --enforce-eager --max-num-batched-tokens 4096 && exit 0

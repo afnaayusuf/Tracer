@@ -390,3 +390,17 @@ def test_stream_mode_deltas_fold_into_state_and_reach_the_lib_fast(store_with_fo
     import json as _json
     st2 = _json.loads((tmp_path / "live" / "status.json").read_text())
     assert st2["stream"] is True and st2["fps"] == 3.0 and st2["volume_s"] == 1.0
+
+
+def test_questions_while_the_model_loads_say_so(store_with_footage):
+    from fastapi.testclient import TestClient
+    from vi.api import create_app
+    db, tmp = store_with_footage
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", live_dir=str(tmp / "live"), load_backend=False)
+    app_state = None
+    c = TestClient(app)
+    assert c.get("/health").json()["model_loaded"] is True
+    r = c.post("/ask", json={"question": "is it working?"}).json()
+    assert r["grounding"] == "status"
+    rep = c.get("/deploy/report").json()
+    assert rep["model"]["loaded"] is True

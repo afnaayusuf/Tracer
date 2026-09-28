@@ -597,37 +597,39 @@ def main() -> None:
             def world_label(t):
                 return (t.entity_id or t.tube_id).split(":")[-1] if t.entity_id else t.tube_id.split(":")[-1]
             vol_cams = []
-            if tilemap is not None and tilemap.kind == "homo":
+            homo = tilemap is not None and tilemap.kind == "homo"
+            if homo:
                 if "composite" not in cams:
                     cams["composite"] = Cam(camera_id="composite", tile_id="T1"); cams["composite"].w, cams["composite"].h = fr.rgb.shape[1], fr.rgb.shape[0]
-                vc = cams["composite"]
-                # ids drawn per cell, then recomposed
-                panels = []
-                for cid, cell in zip(ids, cells):
-                    boxes = [(world_label(tr.tube), (tr.tube.box.x1, tr.tube.box.y1, tr.tube.box.x2, tr.tube.box.y2)) for tr in cams[cid].tracker._tracks.values()
-                             if tr.tube.class_label == "person" and tr.tube.state.value == "active"] if cams[cid].tracker else []
-                    panels.append(annotate_ids(cell, boxes))
-                vc.current["frame"] = compose(panels, spec) if spec else panels[0]
-                vc.ep = next((cams[c].ep for c in ids if cams[c].ep), None); vc.last_live_ms = t_ms
+                vc = cams["composite"]; vc.ep = next((cams[c].ep for c in ids if cams[c].ep), None); vc.last_live_ms = t_ms
                 vol_cams = [vc]
             else:
-                for cid in ids:
-                    c = cams[cid]
-                    boxes = [(world_label(tr.tube), (tr.tube.box.x1, tr.tube.box.y1, tr.tube.box.x2, tr.tube.box.y2)) for tr in c.tracker._tracks.values()
-                             if tr.tube.class_label == "person" and tr.tube.state.value == "active"] if c.tracker else []
-                    c.current["vol_frame"] = annotate_ids(c.current["frame"], boxes) if c.current["frame"] is not None else None
-                    vol_cams.append(c)
+                vol_cams = [cams[cid] for cid in ids]
+            def annotated_now(vc):
+                """the annotated frame for this volume source, built ONLY when a sample is due (CPU: the 0.89x lesson)"""
+                if vc.camera_id == "composite":
+                    panels = []
+                    for cid, cell in zip(ids, cells):
+                        boxes = [(world_label(tr.tube), (tr.tube.box.x1, tr.tube.box.y1, tr.tube.box.x2, tr.tube.box.y2)) for tr in cams[cid].tracker._tracks.values()
+                                 if tr.tube.class_label == "person" and tr.tube.state.value == "active"] if cams[cid].tracker else []
+                        panels.append(annotate_ids(cell, boxes))
+                    return compose(panels, spec) if spec else panels[0]
+                c = vc
+                if c.current["frame"] is None:
+                    return None
+                boxes = [(world_label(tr.tube), (tr.tube.box.x1, tr.tube.box.y1, tr.tube.box.x2, tr.tube.box.y2)) for tr in c.tracker._tracks.values()
+                         if tr.tube.class_label == "person" and tr.tube.state.value == "active"] if c.tracker else []
+                return annotate_ids(c.current["frame"], boxes)
             for vc in vol_cams:
-                frame_now = vc.current.get("vol_frame") if vc.camera_id != "composite" else vc.current["frame"]
-                if frame_now is None:
-                    continue
                 if vc.vol_t0 is None:
                     vc.vol_t0 = t_ms
                 period_ms = int(a.volume_s * 1000)
                 want = sample_times(vc.vol_t0, period_ms, a.volume_frames)
                 k = len(vc.vol_frames)
                 if k < a.volume_frames and t_ms >= want[k]:
-                    vc.vol_frames.append((t_ms, downscale(frame_now, a.volume_max_w)))
+                    frame_now = annotated_now(vc)
+                    if frame_now is not None:
+                        vc.vol_frames.append((t_ms, downscale(frame_now, a.volume_max_w)))
                 if t_ms - vc.vol_t0 >= period_ms:
                     if len(vc.vol_frames) >= 2:
                         ids_present = sorted({world_label(tr.tube) for cid in ids for tr in (cams[cid].tracker._tracks.values() if cams[cid].tracker else [])

@@ -319,11 +319,26 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         return {"text": " ".join(bits), "mood": "bot" if st.get("running") else "botUnsure", "citations": [], "evidence": [],
                 "grounding": "status", "latency_ms": 0, "action": "answer"}
 
+    if load_backend and backend_name != "fake" and os.environ.get("VI_PRELOAD", "1") == "1":
+        def _preload():
+            t0 = time.time()
+            try:
+                backend(); writer()
+                state["model_loaded"] = True; state["load_s"] = round(time.time() - t0)
+                print(f"[api] model ready: {model} in {state['load_s']} s", flush=True)
+            except Exception as e:
+                state["load_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+                print(f"[api] model load FAILED: {state['load_error']}", flush=True)
+        threading.Thread(target=_preload, daemon=True).start()
+    else:
+        state["model_loaded"] = True
+
     @app.get("/health")
     def health():
         b = footage_bounds(engine)
         eps = episodes_in(engine, b[0], b[1]) if b else []
-        return {"ok": True, "backend": backend_name, "model": model, "tz": tz_name, "uptime_s": round(time.time() - state["started"]),
+        return {"ok": True, "backend": backend_name, "model": model, "model_loaded": bool(state.get("model_loaded")), "load_error": state.get("load_error"),
+                "load_s": state.get("load_s"), "tz": tz_name, "uptime_s": round(time.time() - state["started"]),
                 "footage": {"start": clock(b[0]), "end": clock(b[1]), "start_ms": b[0], "end_ms": b[1]} if b else None,
                 "episodes": len(eps), "ingest": ingest_status()}
 
@@ -338,6 +353,10 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         from vi.agent import classify_scope
         if classify_scope(q)[0] == "status":
             return status_answer()
+        if not state.get("model_loaded"):
+            return {"text": ("The model is still loading" + (f" ({model})" if model else "") + "; status questions work now, everything else in a minute."
+                             if not state.get("load_error") else f"The model failed to load: {state['load_error']}"),
+                    "mood": "botUnsure", "citations": [], "evidence": [], "grounding": "loading", "latency_ms": 0, "action": "answer"}
         b = footage_bounds(engine)
         now_ms = b[1] if b else int(time.time() * 1000)
         import concurrent.futures
@@ -634,7 +653,8 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
                           "sustainable_period_s": sustainable_period, "frame_to_lib_ms_p50": st.get("frame_to_lib_ms_p50"),
                           "meets_1s": (st.get("frame_to_lib_ms_p50") is not None and st["frame_to_lib_ms_p50"] <= 1000),
                           "note": "coverage = periods with a record / periods elapsed; frame_to_lib = newest frame captured -> its delta in the store"},
-            "model": {"name": model, "backend": backend_name, "sheet_ms_p50": (sorted(state["sheet_ms"])[len(state["sheet_ms"]) // 2] if state["sheet_ms"] else None)},
+            "model": {"name": model, "backend": backend_name, "loaded": bool(state.get("model_loaded")), "load_error": state.get("load_error"),
+                      "sheet_ms_p50": (sorted(state["sheet_ms"])[len(state["sheet_ms"]) // 2] if state["sheet_ms"] else None)},
             "gpu": None,
         }
         try:
@@ -645,6 +665,8 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         except Exception:
             pass
         verdict = []
+        if not state.get("model_loaded"):
+            verdict.append("model not loaded yet" + (f" ({state['load_error']})" if state.get("load_error") else " (loading)"))
         if report["perception"]["keeps_up"]: verdict.append(f"perception keeps up at {fps:g} fps x {cams} cameras" + (f" (~{max_cams_est} cameras possible)" if max_cams_est else ""))
         elif rt is not None: verdict.append(f"perception is behind real time ({rt}x)")
         if cov is not None:
