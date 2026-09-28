@@ -525,6 +525,26 @@ def _window_tool(engine: Engine, step: ToolStep, ws: int, we: int, camera_id: st
     return run_tool(engine, step, None)
 
 
+def script_fallback_answer(script: str, ws: int, we: int, tz) -> dict:
+    """A deterministic answer built from the script itself: the people line, the latest periods, the latest
+    activity, the last events. Used when the model runs out of steps or produces nothing usable."""
+    from .timeground import fmt
+    lines = script.splitlines()
+    people = next((l.strip() for l in lines if l.startswith("PEOPLE:") or l.startswith("CAST:")), "")
+    names = [l.strip() for l in lines if re.match(r"\s+W\d+\s+person", l)][:4]
+    periods = [l.strip() for l in lines if re.match(r"\s+\d\d:\d\d:\d\d–\d\d:\d\d:\d\d\s", l)][-3:]
+    acts = [l.strip() for l in lines if re.match(r"\s+\d\d:\d\d:\d\d\s+W\d+\s", l)][-3:]
+    evs = [l.strip() for l in lines if re.match(r"\s+\d\d:\d\d:\d\d\s+(cam\S+\s+)?\w+_zone|\s+\d\d:\d\d:\d\d\s+\S+\s+(enter|exit|dwell|relink)", l)][-3:]
+    bits = [f"From the lib for {fmt(ws, tz)}–{fmt(we, tz)}:"]
+    if people: bits.append(people.replace("PEOPLE:", "People:").replace("CAST:", "People:"))
+    bits += [n for n in names]
+    if periods: bits.append("Latest periods: " + " | ".join(periods))
+    if acts: bits.append("Latest activity: " + " | ".join(acts))
+    if evs: bits.append("Latest events: " + " | ".join(evs))
+    cites = sorted(set(re.findall(r"\b(W\d+|[A-Za-z0-9_]+:E\d+)\b", " ".join(bits))))[:8]
+    return {"action": "answer", "text": " ".join(bits)[:900], "citations": cites, "cited": bool(cites), "confidence": 0.5, "handled_by": "fallback"}
+
+
 AFFIRM_RE = re.compile(r"^\s*(?:(?:yes|yeah|yep|yup|exactly|correct|right|that one|that's right|ok|okay|sure|go ahead|please|do it|the first|the second|the latter|the former)[\s,!.]*)+$", re.I)
 
 
@@ -653,7 +673,7 @@ def ask_window(engine: Engine, question: str, backend, now_ms: int, tz_name: str
                  "cited": bool(valid), "unsupported_event_claims": bad_claims, "numeric_issue": issue}
         break
     if final is None:
-        final = {"action": "answer", "text": "I could not complete this within the step budget.", "citations": [], "cited": False, "confidence": 0.0}
+        final = script_fallback_answer(script, ws, we, tz)          # the lib answers when the model cannot: never an empty hand
     return {"question": question, "grounding": g.kind, "camera_id": cam, "window_ms": [ws, we], "window": f"{fmt(ws, tz)}–{fmt(we, tz)}" + (f" on {cam}" if cam else ""),
             "backend": getattr(backend, "name", "?"), "steps": len(trace), "trace": trace, "final": final,
             "latency": {"total_ms": round((time.perf_counter() - t_start_total) * 1000), "model_ms": round(model_ms), "tool_ms": round(tool_ms),

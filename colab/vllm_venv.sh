@@ -83,19 +83,34 @@ if [ "$cmd" = venv ]; then "$VENV/bin/python" -c "import sys; print('   venv pyt
 install_vllm || exit 1
 "$VENV/bin/python" -c "import vllm, torch; print('   vllm', vllm.__version__, 'torch', torch.__version__, 'cuda', torch.version.cuda)" || exit 1
 echo "   driver CUDA $(driver_cuda)"
-pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true
-# clean process environment: no PYTHONPATH, no user site, and only the driver's library dir on LD_LIBRARY_PATH
-# (Colab's LD_LIBRARY_PATH points at the main environment's CUDA libraries, which can shadow the venv's)
-nohup env -u PYTHONPATH PYTHONNOUSERSITE=1 LD_LIBRARY_PATH="${VLLM_LD_LIBRARY_PATH:-/usr/lib64-nvidia}" \
-  "$VENV/bin/python" -m vllm.entrypoints.openai.api_server --model "$MODEL" --port "$PORT" \
-  --max-model-len "${VLLM_MAX_LEN:-8192}" --gpu-memory-utilization "${VLLM_GPU_UTIL:-0.85}" --dtype bfloat16 --max-num-seqs 4 \
-  --enable-prefix-caching > "$LOG" 2>&1 &
-echo "-- waiting for http://127.0.0.1:$PORT (weights download on first run)"
-for i in $(seq 1 120); do
-  if curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
-    echo "   vLLM up: $(curl -s "http://127.0.0.1:$PORT/v1/models" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["id"])')"; exit 0
-  fi
-  if ! pgrep -f "vllm.entrypoints.openai.api_server" >/dev/null; then echo "   server exited; root cause:"; root_cause; exit 1; fi
-  sleep 5
-done
-echo "   server did not come up in 10 min; root cause:"; root_cause; exit 1
+root_cause_last() {  # the exception itself is the LAST error line, not the first traceback frame
+  grep -E "Error|error|Exception|not supported|No module|CUDA" "$LOG" | grep -v "INFO\|TracerWarning\|Traceback\|File \"" | tail -6 | cut -c1-240
+}
+serve_once() {  # $1 = label, rest = extra args
+  local label="$1"; shift
+  pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true; sleep 2
+  # clean process environment: no PYTHONPATH, no user site, and only the driver's library dir on LD_LIBRARY_PATH
+  # (Colab's LD_LIBRARY_PATH points at the main environment's CUDA libraries, which can shadow the venv's)
+  nohup env -u PYTHONPATH PYTHONNOUSERSITE=1 LD_LIBRARY_PATH="${VLLM_LD_LIBRARY_PATH:-/usr/lib64-nvidia}" ${VLLM_ENV:-} \
+    "$VENV/bin/python" -m vllm.entrypoints.openai.api_server --model "$MODEL" --port "$PORT" \
+    --max-model-len "${VLLM_MAX_LEN:-8192}" --gpu-memory-utilization "${VLLM_GPU_UTIL:-0.85}" --dtype bfloat16 --max-num-seqs 4 \
+    --enable-prefix-caching --limit-mm-per-prompt '{"image": 8, "video": 1}' "$@" > "$LOG" 2>&1 &
+  echo "-- waiting for http://127.0.0.1:$PORT ($label; weights download on first run)"
+  for i in $(seq 1 120); do
+    if curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
+      echo "   vLLM up ($label): $(curl -s "http://127.0.0.1:$PORT/v1/models" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["id"])')"; return 0
+    fi
+    if ! pgrep -f "vllm.entrypoints.openai.api_server" >/dev/null; then echo "   server exited ($label); cause:"; root_cause_last; return 1; fi
+    sleep 5
+  done
+  echo "   server did not come up in 10 min ($label); cause:"; root_cause_last; return 1
+}
+# attempt 1: defaults. attempt 2: conservative kernels (eager, Triton attention: what a new GPU generation such as
+# Blackwell sm_120 needs when the FlashAttention wheels have no kernels for it). attempt 3: smaller footprint.
+serve_once "defaults" && exit 0
+cp "$LOG" "${LOG%.log}.attempt1.log"
+VLLM_ENV="VLLM_ATTENTION_BACKEND=TRITON_ATTN" serve_once "eager + Triton attention" --enforce-eager && exit 0
+cp "$LOG" "${LOG%.log}.attempt2.log"
+VLLM_ENV="VLLM_ATTENTION_BACKEND=TRITON_ATTN" VLLM_MAX_LEN=6144 VLLM_GPU_UTIL=0.6 serve_once "eager + Triton + small" --enforce-eager --max-num-batched-tokens 4096 && exit 0
+echo "   all attempts failed; logs: ${LOG%.log}.attempt1.log ${LOG%.log}.attempt2.log $LOG"
+exit 1

@@ -347,7 +347,8 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
             state["questions_waiting"] += 1
             try:
                 with state["model_lock"]:                            # the writer yields; one model, questions first
-                    return ask_window(engine, q, backend(), now_ms, tz_name, 6, (inp.history or [])[-3:], inspector=inspect_fn_unlocked)
+                    steps = int(os.environ.get("VI_MAX_STEPS", "4" if backend_name == "transformers" else "6"))
+                    return ask_window(engine, q, backend(), now_ms, tz_name, steps, (inp.history or [])[-3:], inspector=inspect_fn_unlocked)
             finally:
                 state["questions_waiting"] -= 1
         fut = pool.submit(_run)

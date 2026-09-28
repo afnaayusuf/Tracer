@@ -240,3 +240,29 @@ def test_salvage_flattens_citation_objects_and_ids_in_prose():
     step = _salvage(json.dumps({"action": "answer", "text": "cam1:E10 arrived at 00:04.0 [ev_0123456789abcdef]",
                                 "citations": [{"entity_id": "cam1:E10"}, ["cam1:4000:10"], 7]}))
     assert step is not None and step.citations == ["cam1:E10", "cam1:4000:10", "ev_0123456789abcdef"]
+
+
+def test_step_budget_never_returns_an_empty_answer():
+    """A model that only ever calls tools exhausts the budget; the answer then comes from the script."""
+    import json as _json
+    from vi.agent import ask_window, footage_bounds
+    from vi.agent.loop import script_fallback_answer
+    from vi.ingest.synthetic import write_walk_clip
+    from vi.store import connect
+    import subprocess, sys, os, tempfile, pathlib
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    clip = write_walk_clip(tmp / "walk.mp4", seconds=6, fps=10)
+    db = f"sqlite+pysqlite:///{tmp / 'vi.db'}"
+    out = subprocess.run([sys.executable, "bench/run_ingest.py", "--source", str(clip), "--db", db, "--model", "fake", "--reid", "hist", "--writer", "none",
+                          "--start-time", "2026-09-27T10:00:00+00:00", "--fps", "5", "--out", str(tmp / "ep"), "--live-dir", str(tmp / "live")],
+                         capture_output=True, text=True, env={**os.environ, "PYTHONPATH": os.getcwd()})
+    assert out.returncode == 0, out.stderr[-800:]
+    engine = connect(db); b = footage_bounds(engine)
+    class Looper:
+        name = "looper"
+        def complete(self, messages, schema):
+            return _json.dumps({"action": "tool", "tool": "coverage", "args": {}, "why": "again"})
+    r = ask_window(engine, "what's going on?", Looper(), b[1], "UTC", max_steps=3)
+    f = r["final"]
+    assert f["handled_by"] == "fallback" and f["text"].startswith("From the lib for") and "People:" in f["text"] and f["citations"]
+    assert "step budget" not in f["text"]
