@@ -29,6 +29,7 @@
       "enum": [
         "vlm",
         "vlm:activity",
+        "vlm:scene",
         "pose",
         "ocr",
         "siglip",

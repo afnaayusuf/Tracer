@@ -250,3 +250,43 @@ def test_lib_summary_and_stream(store_with_footage):
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
     assert r.text.startswith("data: ") and "people_count" in r.text
     assert c.get("/lib.html").status_code == 200 and "Tracer" in c.get("/lib.html").text
+
+
+def test_scene_inventory_and_narration_reach_the_script_and_the_lib_page(store_with_footage):
+    import json as _json
+    from fastapi.testclient import TestClient
+    from vi.agent import footage_bounds
+    from vi.agent.tools import scene_inventory, window_script
+    from vi.api import create_app
+    from vi.episode import EpisodeWriter
+    from vi.schemas import EnrichmentPatch
+    from vi.store import IncrementalLoader, connect
+    db, tmp = store_with_footage
+    engine = connect(db); b = footage_bounds(engine)
+    ep_path = next((tmp / "ep").glob("*.jsonl"))
+    ep_id = next(r for r in EpisodeWriter.read(ep_path) if r.kind == "header").episode_id
+    trec = next(r for r in EpisodeWriter.read(ep_path) if r.kind == "tube").tube
+    sc = EnrichmentPatch(patch_id="sc_cam1_1", tube_id="cam1:scene", produced_at_ms=b[0] + 500, source="vlm:scene",
+                         payload={"camera_id": "cam1", "objects": [{"object": "keyboard", "where": "on the desk, right", "state": None, "count": None, "confidence": .9},
+                                                                    {"object": "cardboard box", "where": "on the counter", "state": "open", "count": 2, "confidence": .8}]}, confidence=0.6)
+    nr = EnrichmentPatch(patch_id="nr_1", tube_id=trec.tube_id, produced_at_ms=b[0] + 2000, source="vlm:activity",
+                         payload={"activity": "He unpacks small boxes of glass jugs and checks each one.", "steps": ["takes a small box out", "inspects a glass jug", "puts it back"],
+                                  "objects_handled": [{"object": "glass jug", "state": "inspected"}], "counts": {"small box": 12},
+                                  "entity_id": trec.entity_id or f"anon:{trec.tube_id}", "camera_id": "cam1", "kind": "narration"}, confidence=0.7)
+    with ep_path.open("a") as f:
+        for pt in (sc, nr):
+            f.write(_json.dumps({"kind": "patch", "episode_id": ep_id, "patch": pt.model_dump(mode="json")}) + "\n")
+    IncrementalLoader(engine).flush(ep_path)
+    inv = scene_inventory(engine, b[1] + 5000)
+    assert inv["cam1"]["objects"][1]["object"] == "cardboard box"
+    script = window_script(engine, b[0], b[1] + 5000)
+    assert "SCENE" in script and "keyboard" in script and "cardboard box x2 (open)" in script
+    assert "steps: takes a small box out → inspects a glass jug → puts it back" in script and "small box ≈ 12" in script
+    app = create_app(db_url=db, backend_name="fake", model="fake", tz_name="UTC", keyframes_dir=str(tmp / "keyframes"), live_dir=str(tmp / "live"), load_backend=False)
+    c = TestClient(app)
+    d = c.get("/lib/summary").json()
+    assert d["scene"]["cam1"]["objects"][0]["object"] == "keyboard" and any(a["steps"] for a in d["activities"])
+    r = c.post("/describe", json={"camera_id": "cam1", "tube_ids": ["cam1:scene"], "crops_jpeg_b64": [], "mode": "scene"}).json()
+    assert r["scene"][0]["object"] == "keyboard"
+    r = c.post("/describe", json={"camera_id": "cam1", "tube_ids": [trec.tube_id], "crops_jpeg_b64": [], "mode": "narrate"}).json()
+    assert r["narration"]["steps"]

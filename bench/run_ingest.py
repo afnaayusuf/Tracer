@@ -74,6 +74,10 @@ class Cam:
     sheet_times: list = field(default_factory=list)
     rejected_boxes: list = field(default_factory=list)
     last_activity: dict = field(default_factory=dict)
+    last_scene_ms: int = -10**12
+    scene_energy_at_last: float = 0.0
+    frame_ring: dict = field(default_factory=dict)      # tube_id -> [(t_ms, wide crop), ...] for narration
+    last_narrate: dict = field(default_factory=dict)
 
 
 def main() -> None:
@@ -93,6 +97,8 @@ def main() -> None:
     ap.add_argument("--writer-min-life-s", type=float, default=2.0, help="describe a person only after this long (flickers are not worth a sheet)")
     ap.add_argument("--writer-max-per-min", type=int, default=6, help="sheets per camera per minute")
     ap.add_argument("--activity-every-s", type=float, default=12.0, help="re-describe each confirmed person's activity this often (0 = off)")
+    ap.add_argument("--scene-every-s", type=float, default=60.0, help="full-frame object inventory per camera this often, and on a scene change (0 = off)")
+    ap.add_argument("--narrate-every-s", type=float, default=30.0, help="multi-frame step-by-step narration per active person this often (0 = off)")
     ap.add_argument("--zones", default=None, help="zones JSON (single camera); grid cameras get border exits + label media zones")
     ap.add_argument("--episode-min", type=float, default=10.0); ap.add_argument("--quiet-close-s", type=float, default=30.0)
     ap.add_argument("--realtime", action="store_true"); ap.add_argument("--max-minutes", type=float, default=0)
@@ -165,14 +171,20 @@ def main() -> None:
                         buf = io.BytesIO(); Image.fromarray(np.ascontiguousarray(c)).save(buf, format="JPEG", quality=85)
                         payload["crops_jpeg_b64"].append(base64.b64encode(buf.getvalue()).decode())
                     req = urllib.request.Request(remote, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-                    r = json.load(urllib.request.urlopen(req, timeout=120))
-                    _results.put((cam_id, r.get("cells", []), mode))
+                    r = json.load(urllib.request.urlopen(req, timeout=180))
+                    if mode in ("scene", "narrate"):
+                        r["tube_ids"] = tids
+                        _results.put((cam_id, r, mode))
+                    else:
+                        _results.put((cam_id, r.get("cells", []), mode))
                 except Exception as e:
                     _results.put((cam_id, {"error": str(e)[:120]}, mode))
         threading.Thread(target=_worker, daemon=True).start()
         class _Remote:
             calls = 0; last_ms = 0.0
             def submit(self, cam_id, crops, tids, mode="appearance"):
+                if mode in ("scene", "narrate") and _q.qsize() >= 24:
+                    return False                                          # people first; inventory/narration can wait
                 try:
                     _q.put_nowait((cam_id, list(tids), list(crops), mode)); self.calls += 1; return True
                 except queue.Full:
@@ -226,7 +238,9 @@ def main() -> None:
     def init_cam(cam: Cam, w: int, h: int) -> None:
         cam.w, cam.h = w, h
         if spec:
-            cam.zones = [z for z in default_zones(cam.camera_id, w, h, tile_id=cam.tile_id) if z.kind == "exit"]
+            # placeholder cell-edge exits are noise in a shared space (a top-down counter camera flaps enter/exit at
+            # its left edge every time an arm crosses it); real zones come from calibration
+            cam.zones = [] if (tilemap is not None and tilemap.kind == "homo") else [z for z in default_zones(cam.camera_id, w, h, tile_id=cam.tile_id) if z.kind == "exit"]
             cam.zones += label_zones(spec, w, h, cam.camera_id, cam.tile_id)
         else:
             zp = a.zones or (str(Path("data/zones") / (Path(a.source).stem + ".json")) if (Path("data/zones") / (Path(a.source).stem + ".json")).exists() else None)
@@ -257,6 +271,33 @@ def main() -> None:
         stats["episodes"] += 1
         print(f"[episode] {cam.camera_id} {cam.ep} {status.value} {len(cam.ep_tubes)} tubes -> store tubes={counts['tubes']} events={counts['events']}", flush=True)
         cam.ep, cam.ep_tubes, cam.ep_cast_prev = None, [], set()
+
+    def apply_scene(cam: Cam, r: dict) -> None:
+        from vi.schemas import EnrichmentPatch
+        items = r.get("scene") or []
+        if not items or cam.ep is None:
+            return
+        t_now = cam.last_live_ms or 0
+        patch = EnrichmentPatch(patch_id=f"sc_{cam.camera_id}_{t_now}", tube_id=f"{cam.camera_id}:scene", produced_at_ms=t_now, source="vlm:scene",
+                                payload={"camera_id": cam.camera_id, "objects": items}, confidence=0.6)
+        writer.write_patch(cam.ep, patch); stats["scene_patches"] += 1
+        print(f"[scene] {cam.camera_id}: " + ", ".join(f"{o['object']}" + (f" ({o['state']})" if o.get('state') else "") for o in items[:10]), flush=True)
+
+    def apply_narration(cam: Cam, r: dict, tube_id: str) -> None:
+        from vi.schemas import EnrichmentPatch
+        nar = r.get("narration")
+        if not nar or cam.ep is None:
+            return
+        index = {tr.tube.tube_id: tr.tube for tr in cam.tracker._tracks.values()} if cam.tracker else {}
+        index.update({t.tube_id: t for t in cam.ep_tubes})
+        t = index.get(tube_id)
+        t_now = cam.last_live_ms or 0
+        patch = EnrichmentPatch(patch_id=f"nr_{tube_id}_{t_now}", tube_id=tube_id, produced_at_ms=t_now, source="vlm:activity",
+                                payload={"activity": nar.get("summary"), "steps": nar.get("steps"), "objects_handled": nar.get("objects_handled"),
+                                         "counts": nar.get("counts"), "entity_id": (t.entity_id if t else None), "camera_id": cam.camera_id, "kind": "narration"},
+                                confidence=float(nar.get("confidence", 0.6)))
+        writer.write_patch(cam.ep, patch); stats["narrations"] += 1
+        print(f"[narrate] {cam.camera_id} {t.entity_id if t else tube_id}: {nar.get('summary')} | " + " → ".join(nar.get("steps") or []), flush=True)
 
     def apply_descriptions(cam: Cam, cells: list[dict], mode: str = "appearance") -> None:
         """Attach writer output to the tubes it describes (live or already closed in this episode). A
@@ -368,11 +409,37 @@ def main() -> None:
             if due and vlm.submit(cam.camera_id, [crop_for_embedding(rgb, t.box, pad=0.6) for t in due], [t.tube_id for t in due], "activity"):
                 for t in due: cam.last_activity[t.tube_id] = t_ms
                 stats["activity_sheets"] += 1
+        # scene inventory: per camera every scene_every_s, or sooner when the gate energy jumps (something changed)
+        if vlm is not None and a.scene_every_s and hasattr(vlm, "submit") and frames % 4 == 1:
+            energy = float(getattr(cam.gate, "last_energy", 0.0) or 0.0)
+            changed = abs(energy - cam.scene_energy_at_last) > 0.15
+            if (t_ms - cam.last_scene_ms >= a.scene_every_s * 1000) or (changed and t_ms - cam.last_scene_ms >= 15_000):
+                if vlm.submit(cam.camera_id, [rgb], [f"{cam.camera_id}:scene"], "scene"):
+                    cam.last_scene_ms, cam.scene_energy_at_last = t_ms, energy; stats["scene_sheets"] += 1
+        # narration: keep a wide crop of each active person every ~3 s; every narrate_every_s send the last 6 as a sequence
+        if vlm is not None and a.narrate_every_s and hasattr(vlm, "submit"):
+            for t in live:
+                if t.class_label == "person" and t.state.value == "active" and t.tube_id in cam.described:
+                    ring = cam.frame_ring.setdefault(t.tube_id, [])
+                    if not ring or t_ms - ring[-1][0] >= 3000:
+                        ring.append((t_ms, crop_for_embedding(rgb, t.box, pad=0.8)))
+                        del ring[:-6]
+                    if len(ring) >= 4 and t_ms - cam.last_narrate.get(t.tube_id, -10**12) >= a.narrate_every_s * 1000 and frames % 4 == 3:
+                        if vlm.submit(cam.camera_id, [c for _, c in ring], [t.tube_id], "narrate"):
+                            cam.last_narrate[t.tube_id] = t_ms; stats["narrate_sheets"] += 1
+            for tid in [k for k in cam.frame_ring if k not in {t.tube_id for t in live}]:
+                cam.frame_ring.pop(tid, None)
         if vlm is not None and hasattr(vlm, "poll"):
-            for cam_id, cells, mode in vlm.poll():
-                if isinstance(cells, dict):
+            for cam_id, payload, mode in vlm.poll():
+                if isinstance(payload, dict) and "error" in payload:
                     stats["writer_errors"] += 1; continue
-                apply_descriptions(cams[cam_id], cells, mode)
+                if mode == "scene":
+                    apply_scene(cams[cam_id], payload)
+                elif mode == "narrate":
+                    tid = (payload.get("tube_ids") or [None])[0] if isinstance(payload, dict) else None
+                    apply_narration(cams[cam_id], payload, tid or "")
+                else:
+                    apply_descriptions(cams[cam_id], payload, mode)
         cam.ep_tubes += closed
         if cam.ep is not None:
             snaps = [TubeSnapshot(tube_id=t.tube_id, class_label=t.class_label, state=t.state, box=t.box,

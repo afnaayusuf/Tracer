@@ -438,8 +438,24 @@ def activities_window(engine: Engine, t_start_ms: int, t_end_ms: int, entity_id:
             continue
         out.append({"t_ms": r["produced_at_ms"], "entity_id": p.get("entity_id"), "camera_id": p.get("camera_id"), "activity": p.get("activity"),
                     "objects_nearby": p.get("objects_nearby") or [], "attention": p.get("attention"), "posture": p.get("posture"),
-                    "carried_item": p.get("carried_item"), "confidence": r["confidence"]})
+                    "carried_item": p.get("carried_item"), "confidence": r["confidence"], "kind": p.get("kind", "sample"),
+                    "steps": p.get("steps") or [], "objects_handled": p.get("objects_handled") or [], "counts": p.get("counts") or {}})
     return out
+
+
+def scene_inventory(engine: Engine, t_end_ms: int, camera_id: str | None = None) -> dict[str, dict]:
+    """Latest object inventory per camera at or before t_end_ms: {camera: {"t_ms", "objects": [...]}}."""
+    with engine.connect() as conn:
+        rows = [dict(r._mapping) for r in conn.execute(select(patches).where(and_(patches.c.source == "vlm:scene", patches.c.produced_at_ms <= t_end_ms))
+                                                       .order_by(patches.c.produced_at_ms.desc()).limit(200))]
+    out: dict[str, dict] = {}
+    for r in rows:
+        p = r["payload"] or {}
+        cam = p.get("camera_id")
+        if not cam or (camera_id and cam != camera_id) or cam in out:
+            continue
+        out[cam] = {"t_ms": r["produced_at_ms"], "objects": p.get("objects") or []}
+    return dict(sorted(out.items()))
 
 
 def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str = "UTC", max_chars: int = 7000,
@@ -474,6 +490,14 @@ def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str =
         lines.append(f"  {w}  person  seen {clock(first)}–{clock(last)}  on {','.join(cams)}" + (f"  looks: {looks}" if looks else ""))
         lines.append("      tracks: " + "; ".join(f"{m['entity_id']} ({','.join(m['cameras'])} {clock(m['first_seen_ms'])}–{clock(m['last_seen_ms'])})" for m in members)
                      + (f"  keyframe {members[0]['keyframe']}" if members[0].get("keyframe") else ""))
+    inv = scene_inventory(engine, t_end_ms, camera_id)
+    if inv:
+        lines.append("SCENE (objects in each camera view, latest inventory):")
+        for cam, d in inv.items():
+            objs = d["objects"][:18]
+            lines.append(f"  {cam} @ {clock(d['t_ms'])}: " + "; ".join(
+                f"{o['object']}" + (f" x{o['count']}" if o.get("count") else "") + (f" ({o['state']})" if o.get("state") else "") + (f" [{o['where']}]" if o.get("where") else "")
+                for o in objs))
     acts = activities_window(engine, t_start_ms, t_end_ms, camera_id=camera_id)
     if acts:
         lines.append(f"ACTIVITY (sampled every ~12 s; what they did, what was within reach, where they looked): {len(acts)} entries")
@@ -484,6 +508,9 @@ def window_script(engine: Engine, t_start_ms: int, t_end_ms: int, tz_name: str =
         for x in shown:
             who = ent_world.get(x["entity_id"], x["entity_id"] or "?")
             bits = [x["activity"] or "—"]
+            if x.get("steps"): bits.append("steps: " + " → ".join(x["steps"]))
+            if x.get("objects_handled"): bits.append("handled: " + ", ".join(f"{o['object']}" + (f" ({o['state']})" if o.get("state") else "") for o in x["objects_handled"]))
+            if x.get("counts"): bits.append("counts: " + ", ".join(f"{k} ≈ {v}" for k, v in x["counts"].items()))
             if x["objects_nearby"]: bits.append("nearby: " + ", ".join(x["objects_nearby"]))
             if x["attention"]: bits.append("looking " + x["attention"])
             if x["posture"]: bits.append(x["posture"])

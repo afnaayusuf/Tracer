@@ -95,6 +95,7 @@ class FrameDiffGate:
         noise_floor = float(np.median(self._noise_hist))
         thr = max(noise_floor * self.k_noise, self.min_thr)
         mask = energy > thr
+        self.last_energy = float(mask.mean())          # fraction of the frame that changed: the ingest's scene-change trigger
         active_fraction = float(mask.mean())
 
         global_motion = active_fraction > self.global_fraction and not luma_step

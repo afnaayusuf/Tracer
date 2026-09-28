@@ -121,7 +121,7 @@ class EnrichmentPatch(BaseModel):
     patch_id: str
     tube_id: str
     produced_at_ms: int
-    source: Literal["vlm", "vlm:activity", "pose", "ocr", "siglip", "reid", "sr"]
+    source: Literal["vlm", "vlm:activity", "vlm:scene", "pose", "ocr", "siglip", "reid", "sr"]
     payload: dict[str, Any]
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     modality: Modality = Modality.rgb

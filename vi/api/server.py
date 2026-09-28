@@ -39,7 +39,7 @@ class DescribeIn(BaseModel):
     camera_id: str
     tube_ids: list[str]
     crops_jpeg_b64: list[str]              # one JPEG per tube, base64
-    mode: str = "appearance"               # appearance (at birth) | activity (at cadence: doing / objects / attention / posture)
+    mode: str = "appearance"               # appearance | activity | scene (one full frame -> inventory) | narrate (frames of one person -> steps)
 
 
 class InspectIn(BaseModel):
@@ -85,17 +85,24 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
     tiles_path = Path(os.environ.get("VI_TILES") or (live_dir / "tiles.json"))
     os.environ["VI_TILES"] = str(tiles_path)                      # the feed side reads the same map
 
+    state["load_lock"] = threading.Lock()
+
     def backend():
-        if state["backend"] is None:
-            if not load_backend or backend_name == "fake":
-                from vi.agent import FakeBackend
-                state["backend"] = FakeBackend()
-            elif backend_name == "openai":
-                from vi.agent import OpenAIBackend
-                state["backend"] = OpenAIBackend(model=model)
-            else:
-                from vi.agent import TransformersBackend
-                state["backend"] = TransformersBackend(model_id=model)
+        """One copy of the model per process. The lock matters: the ingest's first /describe and the
+        first /ask arrive together, and two loads of a 4B do not fit on an L4 (session 40)."""
+        if state["backend"] is not None:
+            return state["backend"]
+        with state["load_lock"]:
+            if state["backend"] is None:
+                if not load_backend or backend_name == "fake":
+                    from vi.agent import FakeBackend
+                    state["backend"] = FakeBackend()
+                elif backend_name == "openai":
+                    from vi.agent import OpenAIBackend
+                    state["backend"] = OpenAIBackend(model=model)
+                else:
+                    from vi.agent import TransformersBackend
+                    state["backend"] = TransformersBackend(model_id=model)
         return state["backend"]
 
     def clock(ms: int) -> str:
@@ -122,6 +129,13 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         crops = [np.asarray(Image.open(io.BytesIO(base64.b64decode(b))).convert("RGB")) for b in inp.crops_jpeg_b64]
         w = writer()
         if w == "fake":
+            if inp.mode == "scene":
+                return {"scene": [{"object": "keyboard", "where": "on the desk", "state": None, "count": None, "confidence": 0.8},
+                                  {"object": "cardboard box", "where": "on the counter", "state": "open", "count": 2, "confidence": 0.8}], "sheet_ms": 0}
+            if inp.mode == "narrate":
+                return {"narration": {"steps": ["takes a small box out of the big box", "inspects a glass jug", "puts it back"],
+                                      "objects_handled": [{"object": "small box", "state": "opened"}, {"object": "glass jug", "state": "inspected"}],
+                                      "summary": "He unpacks small boxes of glass jugs and checks each one.", "counts": {"small box": 12}, "confidence": 0.7}, "sheet_ms": 0}
             cells = [{"tube_id": t, "attributes": {"modality": "rgb", "description": "person", "top_color": "orange", "confidence": 0.7,
                                                    **({"activity": "packing boxes", "objects_nearby": ["box"], "attention": "down", "posture": "standing"} if inp.mode == "activity" else {})}}
                      for t in inp.tube_ids]
@@ -131,6 +145,14 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
                 break
             time.sleep(0.1)
         with state["model_lock"]:
+            if inp.mode == "scene":
+                items = w.scene(crops[0]) if crops else []
+                state["sheets"] += 1; state["sheet_ms"].append(w.last_ms); state["sheet_ms"] = state["sheet_ms"][-50:]
+                return {"scene": items, "sheet_ms": w.last_ms}
+            if inp.mode == "narrate":
+                nar = w.narrate(crops)
+                state["sheets"] += 1; state["sheet_ms"].append(w.last_ms); state["sheet_ms"] = state["sheet_ms"][-50:]
+                return {"narration": nar, "sheet_ms": w.last_ms}
             res = w.describe(crops, inp.tube_ids, mode=inp.mode)
         state["sheets"] += 1; state["sheet_ms"].append(w.last_ms); state["sheet_ms"] = state["sheet_ms"][-50:]
         if res is None:
@@ -428,7 +450,7 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
 
     # ---------------------------------------------------------------- the lib, readable directly
     def lib_summary(window_min: float | None = None, since_ms: int | None = None) -> dict:
-        from vi.agent.tools import activities_window, coverage_window, hard_evidence_people, load_tile_map, world_groups
+        from vi.agent.tools import activities_window, coverage_window, hard_evidence_people, load_tile_map, scene_inventory, world_groups
         b = footage_bounds(engine)
         st = ingest_status()
         if b is None:
@@ -465,11 +487,13 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
         evs = search_events(engine, t_start_ms=(since_ms or ws), t_end_ms=t1, limit=300)
         acts_out = [{"t_ms": x["t_ms"], "t": clock(x["t_ms"]), "person": worlds.get(x["entity_id"], x["entity_id"]), "camera": x["camera_id"],
                      "activity": x["activity"], "objects_nearby": x["objects_nearby"], "attention": x["attention"], "posture": x["posture"],
-                     "carried_item": x["carried_item"]} for x in acts if since_ms is None or x["t_ms"] > since_ms]
+                     "carried_item": x["carried_item"], "kind": x.get("kind"), "steps": x.get("steps") or [], "objects_handled": x.get("objects_handled") or [],
+                     "counts": x.get("counts") or {}} for x in acts if since_ms is None or x["t_ms"] > since_ms]
+        scene = {cam: {"t": clock(d["t_ms"]), "objects": d["objects"]} for cam, d in scene_inventory(engine, t1).items()}
         return {"footage": {"start": clock(t0), "end": clock(t1), "start_ms": t0, "end_ms": t1, "minutes": round((t1 - t0) / 60000, 1)},
                 "now_ms": t1, "window": {"start": clock(ws), "end": clock(t1)}, "people": out_people, "people_count": len(out_people),
                 "hard_evidence_min_people": hard_evidence_people(cast),
-                "activities": acts_out[-200:], "events": [{"t_ms": e["t_ms"], "t": clock(e["t_ms"]), "type": e["type"], "camera": e["camera_id"], "zone": e["zone_id"],
+                "activities": acts_out[-200:], "scene": scene, "events": [{"t_ms": e["t_ms"], "t": clock(e["t_ms"]), "type": e["type"], "camera": e["camera_id"], "zone": e["zone_id"],
                                                            "who": [worlds.get(x, x) for x in (e["subject_entity_ids"] or [])] or (e["subject_tube_ids"] or [])} for e in evs
                                                           if since_ms is None or e["t_ms"] > since_ms][-200:],
                 "episodes": [{"id": e["episode_id"][:12], "start": clock(e["t0_ms"]), "end": clock(e["t1_ms"] or e["t0_ms"]), "status": e["status"]}
@@ -478,7 +502,13 @@ def create_app(db_url: str | None = None, backend_name: str | None = None, model
 
     @app.get("/lib/summary")
     def lib_summary_ep(window_min: float | None = None, since_ms: int | None = None):
-        return lib_summary(window_min, since_ms)
+        try:
+            return lib_summary(window_min, since_ms)
+        except Exception as e:
+            import traceback
+            print(f"[lib] summary error: {type(e).__name__}: {e}\n{traceback.format_exc()}", flush=True)
+            return {"footage": None, "people": [], "activities": [], "events": [], "episodes": [], "ingest": ingest_status(), "now_ms": None,
+                    "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
     @app.get("/lib/stream")
     def lib_stream(window_min: float = 30.0, max_events: int = 0):

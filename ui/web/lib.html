@@ -40,6 +40,7 @@ section h2{font-size:14px;margin:0 0 10px;text-transform:uppercase;letter-spacin
 <main>
   <div style="display:flex;flex-direction:column;gap:20px">
     <section id="live"><h2>Live</h2><img alt="live grid" id="liveimg"><div class="kv" id="ingest" style="margin-top:8px"></div></section>
+    <section><h2>Scene <span style="opacity:.6;font-weight:400">objects in each view</span></h2><div class="feed" id="scene"><div class="empty">no inventory yet</div></div></section>
     <section><h2>Events</h2><div class="feed" id="events"><div class="empty">no events yet</div></div></section>
     <section><h2>Episodes</h2><div class="feed" id="episodes"><div class="empty">—</div></div></section>
   </div>
@@ -54,6 +55,7 @@ var WINDOW_MIN=30;
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function render(d){
   var ing=d.ingest||{};
+  if(d.error){document.getElementById('status').innerHTML='<span class="dot"></span>lib error: '+esc(d.error)+' · '+(ing.running?'ingesting':'no ingest');}
   var live=!!ing.running;
   document.getElementById('status').innerHTML='<span class="dot '+(live?'live':'')+'"></span>'+(d.footage?('footage '+d.footage.start+' → '+d.footage.end+' ('+d.footage.minutes+' min)'):'no footage yet')
     +(live?' · ingesting':(ing.exit_code!=null?' · ingest stopped (exit '+ing.exit_code+')':' · idle'))+' · '+new Date().toLocaleTimeString();
@@ -72,8 +74,11 @@ function render(d){
         +'</div></div>'}).join('')}
   var af=document.getElementById('acts');
   if(!d.activities||!d.activities.length){af.innerHTML='<div class="empty">no activity entries yet</div>'}else{
-    af.innerHTML=d.activities.slice(-80).map(function(x){return '<div class="row"><span class="t">'+esc(x.t)+'</span><span class="who">'+esc(x.person)+'</span><span>'+esc(x.activity||'—')+(x.objects_nearby&&x.objects_nearby.length?' · nearby: '+esc(x.objects_nearby.join(', ')):'')+(x.attention?' · looking '+esc(x.attention):'')+(x.posture?' · '+esc(x.posture):'')+(x.carried_item?' · holding '+esc(x.carried_item):'')+'</span></div>'}).join('');
+    af.innerHTML=d.activities.slice(-80).map(function(x){return '<div class="row"><span class="t">'+esc(x.t)+'</span><span class="who">'+esc(x.person)+'</span><span>'+esc(x.activity||'—')+(x.steps&&x.steps.length?'<br><span style="opacity:.8">'+x.steps.map(esc).join(' → ')+'</span>':'')+(x.objects_handled&&x.objects_handled.length?' · handled: '+x.objects_handled.map(function(o){return esc(o.object)+(o.state?' ('+esc(o.state)+')':'')}).join(', '):'')+(x.objects_nearby&&x.objects_nearby.length?' · nearby: '+esc(x.objects_nearby.join(', ')):'')+(x.attention?' · looking '+esc(x.attention):'')+(x.posture?' · '+esc(x.posture):'')+(x.carried_item?' · holding '+esc(x.carried_item):'')+'</span></div>'}).join('');
     af.scrollTop=af.scrollHeight}
+  var sc=document.getElementById('scene');
+  if(!d.scene||!Object.keys(d.scene).length){sc.innerHTML='<div class="empty">no inventory yet</div>'}else{
+    sc.innerHTML=Object.keys(d.scene).map(function(cam){var x=d.scene[cam];return '<div class="row"><span class="t">'+esc(x.t)+'</span><span class="who">'+esc(cam)+'</span><span>'+x.objects.map(function(o){return esc(o.object)+(o.count?' ×'+o.count:'')+(o.state?' ('+esc(o.state)+')':'')+(o.where?' <span style="opacity:.55">['+esc(o.where)+']</span>':'')}).join(' · ')+'</span></div>'}).join('')}
   var ef=document.getElementById('events');
   if(!d.events||!d.events.length){ef.innerHTML='<div class="empty">no events yet</div>'}else{
     ef.innerHTML=d.events.slice(-80).map(function(e){return '<div class="row"><span class="t">'+esc(e.t)+'</span><span class="who">'+esc(e.camera||'')+'</span><span>'+esc(e.type)+(e.zone?' · '+esc(e.zone):'')+(e.who&&e.who.length?' · '+esc(e.who.join(', ')):'')+'</span></div>'}).join('');
@@ -85,6 +90,6 @@ function poll(){fetch(API+'/lib/summary?window_min='+WINDOW_MIN).then(function(r
 if(window.EventSource){
   var es=new EventSource(API+'/lib/stream?window_min='+WINDOW_MIN);
   es.onmessage=function(ev){try{render(JSON.parse(ev.data))}catch(e){}};
-  es.onerror=function(){es.close();poll();setInterval(poll,3000)};
+  es.onerror=function(){es.close();document.getElementById('status').innerHTML='<span class="dot"></span>stream closed, polling…';poll();setInterval(poll,3000)};
 }else{poll();setInterval(poll,3000)}
 </script></body></html>

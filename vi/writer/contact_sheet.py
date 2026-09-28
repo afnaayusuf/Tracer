@@ -41,6 +41,73 @@ ACTIVITY_PROMPT = (
 )
 
 
+SCENE_PROMPT = (
+    "This is one full camera view of a workplace. List EVERY distinct object you can see (furniture, tools, boxes, devices, "
+    "packaging, products), where it is in the view, and its state. Reply with a JSON array, no prose, at most 25 items:\n"
+    '[{"object": short noun phrase (e.g. "cardboard box", "keyboard", "roll of plastic wrap"), "where": short location in the view '
+    '(e.g. "on the desk, right", "floor, front-left"), "state": short state or null (e.g. "open", "empty", "sealed", "in use"), '
+    '"count": integer if several identical, "confidence": 0-1}]\n'
+    "Do not list people. Do not guess what is inside closed containers."
+)
+
+NARRATE_PROMPT = (
+    "The cells of this grid show the SAME person at successive moments (cell #0 first, then #1, #2 …), a few seconds apart. "
+    "Narrate step by step what the person does across the cells, naming the objects handled and what happens to them. "
+    "Reply with ONE JSON object, no prose:\n"
+    '{"steps": ["step 1 (<= 14 words)", "step 2", ...], "objects_handled": [{"object": noun phrase, "state": short state or null}], '
+    '"summary": one sentence (<= 25 words), "counts": {"<object>": integer estimate} or {}, "confidence": 0-1}\n'
+    "Describe only what is visible. If nothing changes across cells, say so in the summary."
+)
+
+
+def parse_scene_reply(text: str) -> list[dict]:
+    t = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if t.startswith("```"):
+        t = t.strip("`"); t = t[4:] if t.lower().startswith("json") else t
+    a, b = t.find("["), t.rfind("]")
+    if a < 0 or b < 0:
+        return []
+    try:
+        items = json.loads(t[a:b + 1])
+    except Exception:
+        return []
+    out = []
+    for it in items if isinstance(items, list) else []:
+        if isinstance(it, dict) and it.get("object"):
+            cnt = it.get("count")
+            out.append({"object": str(it["object"])[:40], "where": (str(it["where"])[:40] if it.get("where") else None),
+                        "state": (str(it["state"])[:30] if it.get("state") else None),
+                        "count": int(cnt) if isinstance(cnt, (int, float)) and cnt > 0 else None,
+                        "confidence": float(it["confidence"]) if isinstance(it.get("confidence"), (int, float)) else 0.6})
+    return out[:25]
+
+
+def parse_narration_reply(text: str) -> dict | None:
+    t = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if t.startswith("```"):
+        t = t.strip("`"); t = t[4:] if t.lower().startswith("json") else t
+    a, b = t.find("{"), t.rfind("}")
+    if a < 0 or b < 0:
+        return None
+    try:
+        o = json.loads(t[a:b + 1])
+    except Exception:
+        return None
+    if not isinstance(o, dict):
+        return None
+    steps = [str(x)[:100] for x in (o.get("steps") or []) if isinstance(x, str)][:8]
+    objs = []
+    for x in (o.get("objects_handled") or []):
+        if isinstance(x, dict) and x.get("object"):
+            objs.append({"object": str(x["object"])[:40], "state": (str(x["state"])[:30] if x.get("state") else None)})
+        elif isinstance(x, str):
+            objs.append({"object": x[:40], "state": None})
+    counts = {str(k)[:40]: int(v) for k, v in (o.get("counts") or {}).items() if isinstance(v, (int, float))} if isinstance(o.get("counts"), dict) else {}
+    conf = o.get("confidence", 0.6)
+    return {"steps": steps, "objects_handled": objs[:8], "summary": str(o.get("summary") or "")[:200], "counts": counts,
+            "confidence": float(conf) if isinstance(conf, (int, float)) else 0.6}
+
+
 def pack_sheet(crops: list[np.ndarray], cell: int = 224, cols: int = 4, caption: int = 22):
     """Grid with hard borders and a number in a caption strip BELOW each crop, never over it (a badge
     on top of a 30-px crop is what the model ends up describing). Small crops are upscaled to fill
@@ -166,6 +233,33 @@ class WriterVLM:
         tok = getattr(self.proc, "tokenizer", self.proc)
         self.last_ms = (time.perf_counter() - t0) * 1000
         return re.sub(r"<think>.*?</think>", "", tok.decode(gen, skip_special_tokens=True), flags=re.DOTALL).strip()
+
+    def _generate(self, image, prompt: str, max_new_tokens: int) -> str:
+        from PIL import Image
+        im = image if isinstance(image, Image.Image) else Image.fromarray(np.ascontiguousarray(image)).convert("RGB")
+        messages = [{"role": "user", "content": [{"type": "image", "image": im}, {"type": "text", "text": prompt}]}]
+        t0 = time.perf_counter()
+        try:
+            inputs = self.proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt", enable_thinking=False)
+        except TypeError:
+            inputs = self.proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt")
+        inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+        with self.torch.no_grad():
+            out = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        gen = out[0][inputs["input_ids"].shape[1]:]
+        tok = getattr(self.proc, "tokenizer", self.proc)
+        self.calls += 1
+        self.last_ms = (time.perf_counter() - t0) * 1000
+        return tok.decode(gen, skip_special_tokens=True)
+
+    def scene(self, frame: np.ndarray) -> list[dict]:
+        """Full-frame inventory: what objects are in this view, where, in what state."""
+        return parse_scene_reply(self._generate(frame, SCENE_PROMPT, 900))
+
+    def narrate(self, frames: list[np.ndarray]) -> dict | None:
+        """The same person over time: step-by-step narration with the objects handled."""
+        sheet = pack_sheet(frames, cell=256, cols=3)
+        return parse_narration_reply(self._generate(sheet, NARRATE_PROMPT, 500))
 
     def describe(self, crops: list[np.ndarray], tube_ids: list[str], modality: Modality = Modality.rgb, mode: str = "appearance") -> ContactSheetResult | None:
         sheet = pack_sheet(crops)
